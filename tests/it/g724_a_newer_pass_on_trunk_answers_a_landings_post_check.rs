@@ -7,8 +7,14 @@
 //! is its answer, and the row names that landing. A red there names a range, never this
 //! landing, so the row stays pending until a run narrowed to it says so.
 //!
-//! Guard to mutate: `src/publish.rs` `post_checks_on_trunk` reading no landing after its own
-//! (the older landing's row stays `pending` after the newer one's pass).
+//! G953 (BACKLOG 365, a fleet finding, 2026-11-27: from 18:07Z every R ci-gates post run went to
+//! one machine whose node unit cannot load there, so 14 landings read `unknown`, and a pass on a
+//! newer tip did not answer them). An `unknown` row is a run that answered nothing: it reads
+//! forward as a pending row does, and a newer landing's `unknown` is passed over on the way.
+//!
+//! Guards to mutate: `src/publish.rs` `post_checks_on_trunk` reading no landing after its own
+//! (the older landing's row stays `pending` after the newer one's pass); its `unanswered`
+//! without `unknown` (an unknown row stays `unknown` after a newer pass).
 
 #![cfg(unix)]
 
@@ -145,6 +151,32 @@ fn a_pass_on_a_newer_landing_answers_the_post_check_of_an_older_one() {
         json!([{"check": "suite", "environment": "local", "state": "pass",
             "answered_on": newer_commit}])
     );
+}
+
+#[test]
+fn a_run_that_answered_nothing_is_answered_by_a_newer_pass() {
+    let (test_box, repo, remote) = trunk();
+    let (older, _, _) = land(&test_box, &repo, "CARD-365-A", "src/older.rs");
+    let (middle, _, middle_tree) = land(&test_box, &repo, "CARD-365-B", "src/middle.rs");
+    let (_, newer_commit, newer_tree) = land(&test_box, &repo, "CARD-365-C", "src/newer.rs");
+    let runner = runner_of(&test_box, &remote);
+
+    // WHEN the run on the middle landing answers nothing (a unit its machine could not run)
+    record_suite(&test_box, &runner, &middle_tree, "unknown");
+    // THEN that landing reads unknown, never pass
+    assert_eq!(
+        post(&test_box, &repo, &middle),
+        json!([{"check": "suite", "environment": "local", "state": "unknown"}])
+    );
+
+    // WHEN a run on the newer tip passes
+    record_suite(&test_box, &runner, &newer_tree, "pass");
+    // THEN it answers the unknown landing
+    let answered = json!([{"check": "suite", "environment": "local", "state": "pass",
+        "answered_on": newer_commit}]);
+    assert_eq!(post(&test_box, &repo, &middle), answered);
+    // AND the older landing reads past the unknown run to the same pass.
+    assert_eq!(post(&test_box, &repo, &older), answered);
 }
 
 #[test]

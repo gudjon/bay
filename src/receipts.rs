@@ -17,7 +17,7 @@ use crate::change::{Actor, Chain, change_ref};
 use crate::clock::now_rfc3339;
 use crate::ids::new_change_id;
 use crate::repo::Repo;
-use crate::result::BayResult;
+use crate::result::{BayResult, Reason};
 use crate::sweep::Swept;
 
 pub const RECEIPT_SCHEMA: &str = "bay.receipt/1";
@@ -53,10 +53,22 @@ pub fn from_result(change: &str, actor: Option<Actor>, step: &str, result: &BayR
     let reason = result
         .reason
         .map_or_else(|| "fault".to_owned(), |reason| reason.code().to_owned());
-    let recovery = result.retry_when.map_or_else(
-        || "fix the cause, then run bay merge again".to_owned(),
-        str::to_owned,
-    );
+    // G952: a merge main never took opens again only on its author's next merge, after the
+    // seconds the answer names; no runner's pass lifts it, so the table's `by_itself` is wrong.
+    let reopens = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail.get("reopens_in_s"))
+        .and_then(serde_json::Value::as_u64);
+    let recovery = match (result.reason, reopens) {
+        (Some(Reason::PublishOutcomeUnknown), Some(seconds)) => {
+            format!("run bay merge again in {seconds} s")
+        }
+        _ => result.retry_when.map_or_else(
+            || "fix the cause, then run bay merge again".to_owned(),
+            str::to_owned,
+        ),
+    };
     Receipt {
         schema: RECEIPT_SCHEMA.to_owned(),
         id: format!(

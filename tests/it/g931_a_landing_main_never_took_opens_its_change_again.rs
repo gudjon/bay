@@ -11,6 +11,14 @@
 //! `REOPEN_AFTER_S` (drop the age test, and the young phantom opens again under a push that may
 //! still land it); it ends the landing's operation failed and sets the change ready (keep the
 //! operation published, and the land answers `CHANGE_ALREADY_MERGED` again).
+//!
+//! G952 (a fleet finding, 2026-11-27, change 4ked73uh: `bay status` said such a change "is on
+//! main", its receipt said it would recover by itself, and the age was read from the chain's
+//! head, which each answer's receipt moves). The age is the chain's newest state that is not a
+//! receipt (`recorded_at`: read the head again, and a receipt puts the reopen off); `merge
+//! --wait` waits out `reopens_in_s` (`reopens_in` in `wait_land`); the say, the receipt's
+//! recovery and the status sentence name the author's next `bay merge` (`Reason::say`,
+//! `receipts::from_result`, `change_state_say`).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -61,6 +69,29 @@ fn git_with_input(test_box: &TestBox, dir: &Path, args: &[&str], input: &str) ->
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success(), "git {args:?}");
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Appends a state to the remote chain of change `id`, committed now, with the subject a
+/// receipt's append gives it: what each `MERGE_OUTCOME_UNKNOWN` answer writes.
+fn receipt_now(test_box: &TestBox, remote: &Path, id: &str) {
+    let writer = test_box.clone_of(remote, "receipt-writer");
+    let name = format!("refs/bay/changes/{id}");
+    let git = |args: &[&str]| test_box.git_ok(&writer, args);
+    git(&["fetch", "-q", "origin", &format!("+{name}:{name}")]);
+    let head = git(&["rev-parse", &name]);
+    let tree = git(&["rev-parse", &format!("{head}^{{tree}}")]);
+    let draft = git(&["rev-parse", &format!("{head}^2")]);
+    let commit = git(&[
+        "commit-tree",
+        &tree,
+        "-p",
+        &head,
+        "-p",
+        &draft,
+        "-m",
+        "receipt r-g952",
+    ]);
+    git(&["push", "-q", "origin", &format!("{commit}:{name}")]);
 }
 
 /// A change queued with one passing check, whose runner ended before its publishing push with
@@ -195,4 +226,53 @@ fn a_young_landing_main_lacks_is_answered_unknown_and_left_as_it_is() {
     let left = merged["detail"]["reopens_in_s"].as_u64().unwrap_or(0);
     assert!(left > 0 && left <= 600, "{merged}");
     assert_eq!(chain(&remote_git, &id)["state"], "landed");
+
+    // AND (G952) it says when to merge it again, and status never says it is on main
+    let say = merged["say"].as_str().unwrap_or_default();
+    assert!(say.contains("again in"), "{merged}");
+    let status = test_box.bay_ok(&view, &["status", &id]);
+    let said = status["say"].as_str().unwrap_or_default();
+    assert!(said.contains("does not hold it"), "{status}");
+    let receipts = status["detail"]["changes"][0]["receipts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        receipts.iter().any(|receipt| receipt["recovery"]
+            .as_str()
+            .is_some_and(|recovery| recovery.starts_with("run bay merge again in"))),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_receipt_written_since_the_landing_never_puts_its_reopen_off() {
+    // GIVEN a change whose chain said it landed an hour ago, which main never took, and a
+    // receipt an answer wrote on its chain a moment ago
+    let (test_box, remote, id, view) = phantom(3600);
+    receipt_now(&test_box, &remote, &id);
+    let remote_git = |args: &[&str]| test_box.git_bare(&remote, args);
+
+    // WHEN its author merges it
+    let (code, merged) = result_json(test_box.bay(&view).arg("merge"));
+
+    // THEN it opens again: the receipt is no record of the landing
+    assert_eq!(code, 0, "{merged}");
+    assert_ne!(merged["reason"], "MERGE_OUTCOME_UNKNOWN", "{merged}");
+    assert_eq!(chain(&remote_git, &id)["state"], "ready", "{merged}");
+}
+
+#[test]
+fn a_waiting_merge_waits_out_the_reopen_and_lands_the_change_once() {
+    // GIVEN a change whose chain said it landed ten seconds short of the reopen, which main
+    // never took
+    let (test_box, remote, id, view) = phantom(590);
+
+    // WHEN its author merges it and waits
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+
+    // THEN the wait outlasts the reopen and the change lands, once
+    assert_eq!(code, 0, "{merged}");
+    assert_eq!(merged["decision"], "merged", "{merged}");
+    assert_eq!(on_main(&test_box, &remote, &id), 1);
 }

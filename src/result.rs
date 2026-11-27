@@ -1148,7 +1148,7 @@ impl Reason {
                 "Run `bay start <change>`; copy back any files `detail.unsaved_kept` names, then `bay merge`."
             }
             Self::PublishOutcomeUnknown => {
-                "Do nothing yet: bay's next pass reads main, then records the merge or queues it. Never report it merged; `bay status <change>` shows the outcome."
+                "Never report it merged; with `detail.reopens_in_s`, run `bay merge <change>` again after that many seconds, else wait for bay's next pass."
             }
             Self::ChangeAlreadyLanded => {
                 "Do not retry: the change already merged. `bay merge` in its view sends later edits as the next change; `bay start <intent>` opens new work."
@@ -1514,6 +1514,17 @@ impl Reason {
                     plain(&first.actor)
                 )
             };
+        }
+        // G952: a merge main never took opens again on its author's next `bay merge`, once the
+        // seconds the answer names have passed; no pass of bay's does it.
+        if self == Self::PublishOutcomeUnknown
+            && let Some(seconds) = detail
+                .and_then(|detail| detail.get("reopens_in_s"))
+                .and_then(Value::as_u64)
+        {
+            return format!(
+                "Not added: main does not hold this change. Run bay merge on it again in {seconds} s; bay then adds it again."
+            );
         }
         if let Some(fixed) = self.fixed_say() {
             return fixed.to_owned();
@@ -2324,6 +2335,22 @@ fn unable_say(op: &Value) -> String {
     }
 }
 
+/// The sentence of a change whose state ends its work: added to main, or given up.
+fn ended_say(id: &str, row: &Value) -> Option<String> {
+    // G437: the row's state is bay's own word (`landed`), read before the printed word
+    // (`merged`) replaces it; the sentence never matched what status writes.
+    match row["state"].as_str() {
+        // G952 (a fleet finding, 2026-11-27: status said a change was on main whose merge main
+        // never took): a change recorded merged that main, as read, does not hold.
+        Some("landed") if row.get("landed").is_some_and(Value::is_null) => Some(format!(
+            "{id} is recorded as added, but main as last read does not hold it: run `bay merge` on it, and bay adds it again if main never took it."
+        )),
+        Some("landed") => Some(format!("{id} is on main.")),
+        Some("abandoned") => Some(format!("{id} was given up; nothing more happens to it.")),
+        _ => None,
+    }
+}
+
 fn change_state_say(result: &BayResult) -> Option<String> {
     let id = result.change.as_deref()?;
     let [row] = result
@@ -2339,14 +2366,8 @@ fn change_state_say(result: &BayResult) -> Option<String> {
         return None;
     }
     let id = &crate::change::shown(row["intent"].as_str().unwrap_or_default(), id);
-    // G437: the row's state is bay's own word (`landed`), read before the printed word
-    // (`merged`) replaces it; the sentence never matched what status writes.
-    match row["state"].as_str() {
-        Some("landed") => return Some(format!("{id} is on main.")),
-        Some("abandoned") => {
-            return Some(format!("{id} was given up; nothing more happens to it."));
-        }
-        _ => {}
+    if let Some(said) = ended_say(id, row) {
+        return Some(said);
     }
     let op = &row["operation"];
     if op.is_null() {
@@ -2905,6 +2926,14 @@ mod tests {
         assert!(queued.contains("waits in line"), "{queued}");
         let merged = read(json!({"change": "abcd1234", "state": "landed", "operation": {}}));
         assert!(merged.contains("is on main"), "{merged}");
+        // G952: a status row names the landing main holds; null there is a merge main never took.
+        let untaken =
+            read(json!({"change": "abcd1234", "state": "landed", "landed": null, "operation": {}}));
+        assert!(
+            untaken.contains("main as last read does not hold it"),
+            "{untaken}"
+        );
+        assert!(!untaken.contains("is on main"), "{untaken}");
         let draft = read(json!({"change": "abcd1234", "state": "open", "operation": null}));
         assert!(draft.contains("not submitted"), "{draft}");
         let refused = read(json!({"change": "abcd1234", "state": "ready",

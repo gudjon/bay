@@ -412,6 +412,12 @@ fn wait_land(
 ) -> Result<BayResult, String> {
     loop {
         let result = submit_land(repo, id, step, true, expedite)?;
+        // G952: a landing main never took opens again on the author's land once its record is
+        // old enough; the wait waits that out, then lands the change as a ready one.
+        if let Some(left) = reopens_in(&result) {
+            std::thread::sleep(left);
+            continue;
+        }
         // G811: this machine handed the operation to the runners: the wait goes on until a
         // runner's outcome, which is reported, never run again here. The run a watching
         // `merge --wait=<s>` started ends at once: its watcher reports ([`observe_land`]).
@@ -535,7 +541,12 @@ fn observe_land(
     timeout: Duration,
     expedite: Option<&str>,
 ) -> Result<BayResult, String> {
-    let submitted = submit_land(repo, id, step, false, expedite)?;
+    let mut submitted = submit_land(repo, id, step, false, expedite)?;
+    // G952: as in [`wait_land`], inside this command's bound.
+    while let Some(left) = reopens_in(&submitted).filter(|left| Instant::now() + *left < until) {
+        std::thread::sleep(left);
+        submitted = submit_land(repo, id, step, false, expedite)?;
+    }
     if submitted.decision != Decision::Queued
         || submitted.waiting_for.as_deref() != Some("executor")
     {
@@ -12074,7 +12085,7 @@ const REOPEN_AFTER_S: u64 = 600;
 /// chain saying landed, while main, fetched again, never held the batch and the remote held no
 /// landed marker of any member; each change kept its intent, so neither it nor a new change
 /// could carry that intent on): a landing main lacks once fetched again, which the remote marks
-/// nowhere, and whose record is older than [`REOPEN_AFTER_S`], never happened. Its operation
+/// nowhere, and whose record is older than [`REOPEN_AFTER_S`] ([`recorded_at`]), never happened. Its operation
 /// ends failed `MERGE_OUTCOME_UNKNOWN`, the change is ready again, and `None` tells the land
 /// to go on as for any ready change. Only the author's land reopens: a runner's pass never does.
 ///
@@ -12122,11 +12133,7 @@ fn landed_if_on_main(
     if !matches!(crate::undo::marker(repo, &ctx.id), Ok(None)) {
         return unknown(ctx, None);
     }
-    let recorded = repo
-        .git
-        .run(&["show", "-s", "--format=%ct", &ctx.head])
-        .ok()
-        .and_then(|time| time.trim().parse::<u64>().ok());
+    let recorded = recorded_at(&repo.git, &ctx.head);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
@@ -12148,6 +12155,50 @@ fn landed_if_on_main(
         return Err(CHAIN_MOVED.to_owned());
     }
     Ok(None)
+}
+
+/// The most chain states [`recorded_at`] reads back from the head.
+const RECORDED_SPAN: usize = 64;
+
+/// G952 (a fleet finding, 2026-11-27: each `MERGE_OUTCOME_UNKNOWN` answer wrote a receipt on
+/// the change's chain, so an author who merged again inside [`REOPEN_AFTER_S`] put the reopen
+/// off each time): when the chain last moved for anything but a receipt, as the commit time of
+/// its newest first-parent state from `head` that is not one. Past [`RECORDED_SPAN`] receipts,
+/// the oldest one read.
+fn recorded_at(git: &Git, head: &str) -> Option<u64> {
+    let span = RECORDED_SPAN.to_string();
+    let text = git
+        .run(&[
+            "log",
+            "--first-parent",
+            "-n",
+            &span,
+            "--format=%ct %s",
+            head,
+        ])
+        .ok()?;
+    let mut oldest = None;
+    for line in text.lines() {
+        let (at, subject) = line.split_once(' ').unwrap_or((line, ""));
+        let Ok(at) = at.parse::<u64>() else {
+            continue;
+        };
+        if !subject.starts_with("receipt ") {
+            return Some(at);
+        }
+        oldest = Some(at);
+    }
+    oldest
+}
+
+/// G952: how long before a landing main never took opens again, from the
+/// `MERGE_OUTCOME_UNKNOWN` answer that names it (`reopens_in_s`, [`landed_if_on_main`]).
+fn reopens_in(result: &BayResult) -> Option<Duration> {
+    if result.reason != Some(Reason::PublishOutcomeUnknown) {
+        return None;
+    }
+    let seconds = result.detail.as_ref()?.get("reopens_in_s")?.as_u64()?;
+    Some(Duration::from_secs(seconds))
 }
 
 /// G875: whether main holds `commit`: as this store's tracking ref holds main, else as the
@@ -12855,9 +12906,10 @@ pub const ANSWERED_ON: &str = "answered_on";
 /// 2026-11-14: four landings showed their post checks `pending` for hours, each answered by a run
 /// on a newer tip). A runner runs a post check on main's newest tip only, and that run answers
 /// every landing since the check's previous run (G439), so the first record at or after a landing
-/// is its answer. A row still `pending` reads forward along main's first-parent line, the oldest
-/// landing first, to the first landing with a record of the check: when that answer is a pass,
-/// the row passes and names the landing in [`ANSWERED_ON`]. Any other answer leaves it `pending`:
+/// is its answer. A row still `pending`, or `unknown` (G953: its run answered nothing), reads
+/// forward along main's first-parent line, the oldest landing first, to the first landing with an
+/// answer of the check: when that answer is a pass, the row passes and names the landing in
+/// [`ANSWERED_ON`]. Any other answer leaves it as it was:
 /// a red names its range, never one landing in it, and only a run narrowed to this one (G495,
 /// `[runner] bisect_post`) can say it failed. At most [`crate::red::DEFAULT_REACH`] newer
 /// landings are read, a few at first, as the first record is near.
@@ -12872,8 +12924,11 @@ pub fn post_checks_on_trunk(
     registry: Option<&crate::registry::Registry>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut rows = post_checks(git, commit, registry)?;
-    let unanswered =
-        |row: &serde_json::Value| row["state"] == "pending" && row[RERUN_DUE].is_null();
+    // G953: an `unknown` row is a run that answered nothing (a unit its machine could not run),
+    // so a newer pass answers it as it answers a pending one.
+    let unanswered = |row: &serde_json::Value| {
+        (row["state"] == "pending" && row[RERUN_DUE].is_null()) || row["state"] == "unknown"
+    };
     let mut open: Vec<usize> = (0..rows.len())
         .filter(|at| unanswered(&rows[*at]))
         .collect();
