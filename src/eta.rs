@@ -460,15 +460,11 @@ pub fn environments_of(
     if policy.unchecked {
         return Vec::new();
     }
-    let declared: Vec<crate::policy::DeclaredPath> = record
-        .declared_inputs
-        .iter()
-        .filter_map(|input| match input {
-            crate::inputs::DeclaredInput::Path(path) => Some(crate::policy::DeclaredPath {
-                path: path.clone(),
-                is_file: false,
-            }),
-            crate::inputs::DeclaredInput::Named { .. } => None,
+    let declared: Vec<crate::policy::DeclaredPath> = crate::inputs::paths(&record.declared_inputs)
+        .into_iter()
+        .map(|path| crate::policy::DeclaredPath {
+            path,
+            is_file: false,
         })
         .collect();
     let mut out: Vec<String> = policy

@@ -111,13 +111,46 @@ pub enum DeclaredInput {
     Named { input: InputName },
 }
 
-/// The declared paths of `declared`, in order.
+/// A declared path as the repository names it, from its root: without a leading `/` or `./`
+/// (BACKLOG 354: `/crates` and `crates` name one path, and git reads `/crates` as a path
+/// outside the repository). `/`, `./` and `.` stay the whole tree.
+#[must_use]
+pub fn plain(path: &str) -> &str {
+    let mut rest = path;
+    loop {
+        let trimmed = rest.trim_start_matches('/');
+        let trimmed = trimmed.strip_prefix("./").unwrap_or(trimmed);
+        if trimmed.len() == rest.len() {
+            return rest;
+        }
+        rest = trimmed;
+    }
+}
+
+/// A `--paths` value as the change declares it: [`plain`]. A path with a `..` part names no
+/// path from the repository's root, and is refused before anything is written.
+///
+/// # Errors
+///
+/// The refusal, naming the path.
+pub fn declared_path(path: &str) -> Result<String, String> {
+    let declared = plain(path);
+    if declared.split('/').any(|part| part == "..") {
+        return Err(format!(
+            "{path} has a `..` part: name the path from the repository's root"
+        ));
+    }
+    Ok(declared.to_owned())
+}
+
+/// The declared paths of `declared`, in order, each [`plain`]: a record written with a leading
+/// `/` (bay 0.7.42 and older) reads as its path from the root.
 #[must_use]
 pub fn paths(declared: &[DeclaredInput]) -> Vec<String> {
     declared
         .iter()
         .filter_map(|entry| match entry {
-            DeclaredInput::Path(path) => Some(path.clone()),
+            DeclaredInput::Path(path) => Some(plain(path).to_owned()),
             DeclaredInput::Named { .. } => None,
         })
         .collect()
@@ -728,7 +761,41 @@ pub fn stale_at(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConsumerKind, DeclaredInput, InputName, consumer_kind, within};
+    use super::{
+        ConsumerKind, DeclaredInput, InputName, consumer_kind, declared_path, paths, within,
+    };
+
+    #[test]
+    fn a_declared_path_is_named_from_the_root() {
+        for (given, declared) in [
+            ("/crates/a", "crates/a"),
+            ("./src/", "src/"),
+            ("//./src", "src"),
+            ("/./docs/a.md", "docs/a.md"),
+            ("src", "src"),
+            ("/", ""),
+            (".", "."),
+            ("a/../b", ""),
+        ] {
+            if given.contains("..") {
+                assert!(declared_path(given).is_err(), "{given}");
+            } else {
+                assert_eq!(declared_path(given).as_deref(), Ok(declared), "{given}");
+            }
+        }
+        assert!(declared_path("../x").is_err());
+        assert!(declared_path("/x/..").is_err());
+        assert_eq!(declared_path("x/..y").as_deref(), Ok("x/..y"));
+    }
+
+    #[test]
+    fn a_record_with_a_leading_slash_reads_from_the_root() {
+        let record = [
+            DeclaredInput::Path("/crates/scope-acl".to_owned()),
+            DeclaredInput::Path("docs/".to_owned()),
+        ];
+        assert_eq!(paths(&record), ["crates/scope-acl", "docs/"]);
+    }
 
     #[test]
     fn a_named_input_is_kind_colon_name() {

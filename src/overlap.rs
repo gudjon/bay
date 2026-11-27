@@ -132,17 +132,16 @@ pub(crate) fn live(state: ChangeState) -> bool {
     state.is_live()
 }
 
-/// A declared path without a leading `./` or `/`; the whole tree is empty.
-fn plain(path: &str) -> &str {
-    path.trim_start_matches("./").trim_start_matches('/')
-}
-
 /// The declared paths, or the whole tree when there are none.
 fn whole_or(declared: &[String]) -> Vec<&str> {
     if declared.is_empty() {
         vec![""]
     } else {
-        declared.iter().map(String::as_str).map(plain).collect()
+        declared
+            .iter()
+            .map(String::as_str)
+            .map(crate::inputs::plain)
+            .collect()
     }
 }
 

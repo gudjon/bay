@@ -32,9 +32,10 @@ enum Command {
         /// What this work is, in a few words (or a card id), or an existing change's id to pick
         /// it up
         intent: String,
-        /// The paths this change reads and writes (its declared inputs); picking up a change, the
-        /// paths it declares too, kept in its view, while it keeps its place in line
-        #[arg(long, num_args = 1..)]
+        /// The paths this change reads and writes (its declared inputs), from the repository's
+        /// root (`/src` is `src`); picking up a change, the paths it declares too, kept in its
+        /// view, while it keeps its place in line
+        #[arg(long, num_args = 1.., value_parser = bay::inputs::declared_path)]
         paths: Vec<String>,
         /// A named input this change depends on, `<kind>:<name>` (repeatable)
         #[arg(long = "input", value_name = "KIND:NAME", value_parser = bay::inputs::InputName::parse)]
@@ -99,7 +100,7 @@ enum Command {
         /// Save only the edits under these paths (from the repository's root), from the checkout
         /// bay runs in, main or linked: the change declares them, and the checkout's HEAD and
         /// files stay as they were. A path with no edit is refused
-        #[arg(long, num_args = 1..)]
+        #[arg(long, num_args = 1.., value_parser = bay::inputs::declared_path)]
         paths: Vec<String>,
     },
     /// The changes waiting for an approval this machine's approver (`bay.approverName`) can give,

@@ -1134,7 +1134,7 @@ fn differs(git: &Git, envs: &[(&str, &str)], saved: &str) -> bool {
 /// cannot occur, since the pattern starts with `/`.
 #[must_use]
 pub fn sparse_pattern(path: &str) -> String {
-    let trimmed = path.trim_start_matches("./").trim_start_matches('/');
+    let trimmed = crate::inputs::plain(path);
     let kept = trimmed.trim_end_matches(' ');
     let mut pattern = String::with_capacity(trimmed.len() + 8);
     pattern.push('/');
@@ -1354,10 +1354,7 @@ const WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
 /// matches no directory written with its trailing `/`, and exits 0 having fetched nothing.
 #[must_use]
 pub fn history_pathspec(path: &str) -> String {
-    let trimmed = path
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .trim_end_matches('/');
+    let trimmed = crate::inputs::plain(path).trim_end_matches('/');
     if trimmed.is_empty() {
         ".".to_owned()
     } else {
