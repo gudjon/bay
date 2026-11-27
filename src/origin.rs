@@ -224,21 +224,8 @@ pub fn forward(git: &Git, dir: &Path, input: &str, within: Duration) -> Result<(
     if sent.is_empty() {
         return Ok(());
     }
-    // The origin's own trunk hook judges after this one: a push it refuses never reaches the
-    // hosted remote.
-    for update in &sent {
-        let judged = crate::host::judge_update(git, &update.name, &update.old, &update.new)
-            .map_err(|error| {
-                format!(
-                    "the origin could not judge {}: {}",
-                    update.name,
-                    error.message()
-                )
-            })?;
-        if let Some(why) = judged {
-            return Err(why);
-        }
-    }
+    // The origin's trunk rule judged this push before it (`crate::host::judge_trunk`, G933): a
+    // push it refuses never reaches the hosted remote.
     let within = within.saturating_sub(FORWARD_MARGIN);
     if within < Duration::from_secs(1) {
         return Err("bay origin: the hook's bound left no time to forward the push".to_owned());
@@ -988,6 +975,13 @@ struct Due {
 
 fn run_serve(path: &Path, once: bool) -> Result<BayResult, String> {
     let git = Git::new(path);
+    // G933: the origin's pre-receive hook judges the trunk rule, so an `update` hook left from
+    // an older bay only costs each push a process for each ref.
+    match crate::host::drop_update_hook(&git) {
+        Ok(true) => eprintln!("bay origin: removed the update hook; pre-receive judges the trunk"),
+        Ok(false) => {}
+        Err(why) => eprintln!("bay origin: the update hook stays: {why}"),
+    }
     let mut tail = Tail::default();
     let mut due = Due::default();
     // G892: a serving origin moves to a new bay between passes, as a runner does.

@@ -358,7 +358,7 @@ fn targets(
 /// ([`Judge::registry`]), and an evidence notes ref adds only records that are its producer's,
 /// every `approval` among them signed by an enrolled approver under that name, and withdraws
 /// none ([`Judge::evidence`]). Every other ref is kept as on a host with no registry: trunk by
-/// the append-only update hook, promotion targets by [`targets`].
+/// the append-only rule (`crate::host::judge_trunk`), promotion targets by [`targets`].
 fn approvals_only(git: &Git, registry: &Registry, updates: &[Update]) -> Result<(), String> {
     let judge = Judge {
         git,
@@ -750,7 +750,7 @@ impl Judge<'_> {
 
     fn trunk(&self, update: &Update) -> Result<(), String> {
         if is_zero(&update.new) {
-            return Ok(()); // the append-only update hook refuses it
+            return Ok(()); // the append-only rule refuses it (`crate::host::judge_trunk`)
         }
         let range = if is_zero(&update.old) {
             update.new.clone()

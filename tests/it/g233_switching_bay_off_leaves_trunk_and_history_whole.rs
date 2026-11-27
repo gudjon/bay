@@ -9,8 +9,9 @@
 //!
 //! 1. Stop every `bay runner run`. A queued change stays unmerged, and its record stays under
 //!    `refs/bay/changes/`.
-//! 2. Bay-hosted main: on the host, `git config --remove-section hook.bay-trunk;
-//!    git config --remove-section hook.bay-scope; git config --unset bay.main`.
+//! 2. Bay-hosted main: on the host, `git config --remove-section hook.bay-scope;
+//!    git config --unset bay.main`. A host made before G933 also keeps `hook.bay-trunk`: remove
+//!    that section too.
 //! 3. Forge main: remove the branch protection that lets only the executor push. (In this test
 //!    the forge is a plain bare remote, so there is nothing to do.)
 //! 4. On each agent machine, remove bay's agent hook entries first: while they stay, they refuse
@@ -33,8 +34,7 @@ use support::{TestBox, check_files, passing_result};
 
 /// Step 2 of the runbook, on the host `host`.
 fn switch_the_host_off(test_box: &TestBox, host: &Path) {
-    let steps: [&[&str]; 3] = [
-        &["config", "--remove-section", "hook.bay-trunk"],
+    let steps: [&[&str]; 2] = [
         &["config", "--remove-section", "hook.bay-scope"],
         &["config", "--unset", "bay.main"],
     ];

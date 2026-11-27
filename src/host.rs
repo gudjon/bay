@@ -17,9 +17,12 @@ use crate::git::{Git, GitError};
 use crate::result::{BayResult, Reason};
 use crate::version::{GIT_FLOOR_HOSTED_TRUNK, Version};
 
-/// The configured hook's name: `hook.bay-trunk.command` and `hook.bay-trunk.event`.
+/// The `update` hook a host made before G933 carries for its trunk rule:
+/// `hook.bay-trunk.command` and `hook.bay-trunk.event`. A serving origin removes it
+/// ([`drop_update_hook`]); `update` still judges the trunk rule while it stays.
 pub const TRUNK_HOOK: &str = "bay-trunk";
-/// The scoped hook (`hook.rs`): `pre-receive`, active once the host has a key registry.
+/// The host's one hook, `pre-receive`: the trunk rule ([`judge_trunk`]) on every host, and
+/// the scoped judgement (`hook.rs`) once the host has a key registry.
 pub const SCOPE_HOOK: &str = "bay-scope";
 /// The host's trunk branch name, read by the hook.
 pub const TRUNK_KEY: &str = "bay.main";
@@ -107,12 +110,11 @@ fn run_init(
     let object_format = host
         .run(&["rev-parse", "--show-object-format"])
         .map_err(|error| error.message())?;
-    let command = format!("'{}' host hook update", bay.display());
-    let scope = format!("'{}' host hook pre-receive", bay.display());
+    // G933: one `pre-receive` process a push judges the trunk rule too; an `update` hook ran a
+    // process for each ref a push moves.
+    let command = format!("'{}' host hook pre-receive", bay.display());
     for (key, value) in [
-        (format!("hook.{TRUNK_HOOK}.command"), command.as_str()),
-        (format!("hook.{TRUNK_HOOK}.event"), "update"),
-        (format!("hook.{SCOPE_HOOK}.command"), scope.as_str()),
+        (format!("hook.{SCOPE_HOOK}.command"), command.as_str()),
         (format!("hook.{SCOPE_HOOK}.event"), "pre-receive"),
         (TRUNK_KEY.to_owned(), trunk),
         ("core.logAllRefUpdates".to_owned(), "always"),
@@ -145,16 +147,62 @@ fn run_init(
     })))
 }
 
-/// Whether the host at `git` has the trunk hook configured.
+/// Whether the host at `git` judges its trunk rule: in its `pre-receive` hook, or in the
+/// `update` hook of a host made before G933.
 #[must_use]
 pub fn has_trunk_hook(git: &Git) -> bool {
+    configured(git, SCOPE_HOOK, "pre-receive") || configured(git, TRUNK_HOOK, "update")
+}
+
+/// Whether `hook.<name>` runs bay's `host hook <event>` on `event`.
+fn configured(git: &Git, name: &str, event: &str) -> bool {
     let events = git
-        .run(&["config", "--get-all", &format!("hook.{TRUNK_HOOK}.event")])
+        .run(&["config", "--get-all", &format!("hook.{name}.event")])
         .unwrap_or_default();
     let command = git
-        .run(&["config", "--get", &format!("hook.{TRUNK_HOOK}.command")])
+        .run(&["config", "--get", &format!("hook.{name}.command")])
         .unwrap_or_default();
-    events.lines().any(|event| event == "update") && command.contains("host hook update")
+    events.lines().any(|line| line == event) && command.contains(&format!("host hook {event}"))
+}
+
+/// G933: removes the `update` hook of a host made before G933 once its `pre-receive` hook
+/// judges the trunk rule, so a push no longer runs a bay process for each ref it moves. Whether
+/// it removed one.
+///
+/// # Errors
+///
+/// The git fault that left the hook in place.
+pub fn drop_update_hook(git: &Git) -> Result<bool, String> {
+    if !configured(git, TRUNK_HOOK, "update") || !configured(git, SCOPE_HOOK, "pre-receive") {
+        return Ok(false);
+    }
+    git.run(&["config", "--remove-section", &format!("hook.{TRUNK_HOOK}")])
+        .map_err(|error| error.message())?;
+    Ok(true)
+}
+
+/// G933: the trunk rule ([`append_only`]) for the trunk ref of a push, judged in `pre-receive`.
+///
+/// # Errors
+///
+/// The refusal, or the git fault that left the push unjudged (unknown is never pass).
+pub fn judge_trunk(git: &Git, input: &str) -> Result<(), String> {
+    let trunk = format!("refs/heads/{}", served_branch(git));
+    for line in input.lines() {
+        let [old, new, name] = line.split_whitespace().collect::<Vec<_>>()[..] else {
+            continue;
+        };
+        if name != trunk {
+            continue;
+        }
+        let judged = append_only(git, name, old, new).map_err(|error| {
+            format!("the host hook could not judge {name}: {}", error.message())
+        })?;
+        if let Some(why) = judged {
+            return Err(why);
+        }
+    }
+    Ok(())
 }
 
 use crate::hook::is_zero;
@@ -174,6 +222,12 @@ pub fn judge_update(
     if refname != format!("refs/heads/{trunk}") {
         return Ok(None);
     }
+    append_only(git, refname, old, new)
+}
+
+/// The trunk rule for the trunk ref `refname`: never deleted, never recreated once it held
+/// merged changes, and moved only by fast-forward.
+fn append_only(git: &Git, refname: &str, old: &str, new: &str) -> Result<Option<String>, GitError> {
     if is_zero(new) {
         return Ok(Some(format!(
             "{refname} is append-only: deleting it is refused"
@@ -224,9 +278,11 @@ fn pre_receive_bounded(git: &Git, dir: &Path, input: String) -> u8 {
         }
         let git = Git::new(&dir);
         // 0.7.0: an origin sends a push its checks pass to its hosted remote before it takes it.
-        let judged = crate::hook::pre_receive(&git, &input).and_then(|()| {
-            crate::origin::forward(&git, &dir, &input, bound.saturating_sub(started.elapsed()))
-        });
+        let judged = judge_trunk(&git, &input)
+            .and_then(|()| crate::hook::pre_receive(&git, &input))
+            .and_then(|()| {
+                crate::origin::forward(&git, &dir, &input, bound.saturating_sub(started.elapsed()))
+            });
         let _ = done.send(judged);
     });
     match judged.recv_timeout(bound) {
