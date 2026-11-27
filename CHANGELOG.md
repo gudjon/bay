@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.48
+
+- A pass of an older check names no culprit: the change that edited the check owns the red.
+- A red's bisect counts a run on the base only under the base's own check definition.
+- Under `bwrap`, a check's `TMPDIR` is a short path, so a Unix socket there binds.
+- A landing push the host took in part is taken back on the remote, so it never stands landed.
+
 ## 0.7.47
 
 - A wait for a worker names why: the adapter's answer, a hand-back's cause, or environments not served.
