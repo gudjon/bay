@@ -67,5 +67,29 @@
     "verdict": "pass",
     "at": "2026-11-28T02:06:32Z",
     "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWo6IrM4HWKEiywi56LHy96qcm5\n8ohKN/vT3gFKAJ5cUAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQGRtGMxBpo1TXCMx9pkmFXL84oCL7nTp6jxMa2yKpW+gcmn9yit3cj\nvxPaYhh9Iuye15MhEzh3NmzTj2a/sHBwM=\n-----END SSH SIGNATURE-----\n"
+  },
+  {
+    "schema": "bay.evidence/1",
+    "id": "linux-2/test-sha1-files-linux-x86_64-git2.56.1-4bbae769e165",
+    "kind": "check",
+    "subject": {
+      "tree": "aa0396d3f68601acfab7a9599d9f33b07383933c",
+      "commit": "4bbae769e165345c0ab32245b9e7a7eb87fca62f",
+      "base_tree": "62ee2b5b6ec21ddc0cfb4599ae171c6b7621e983"
+    },
+    "check": {
+      "id": "test-sha1-files",
+      "environment": "linux-x86_64-git2.56.1"
+    },
+    "policy_revision": 0,
+    "manifest_digest": "gate",
+    "producer": {
+      "name": "linux-2",
+      "version": "0.7.51"
+    },
+    "verdict": "pass",
+    "at": "2026-11-28T02:30:26Z",
+    "sandbox": "bwrap",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWo6IrM4HWKEiywi56LHy96qcm5\n8ohKN/vT3gFKAJ5cUAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQL2hQ2vpFznjw+v/AEDM0xd1SNXrwmAApqvLMeXuetUuhP4YF82o3s\nZfeG5f6L6dMuJHVSNgy6C5rj47+1medQ0=\n-----END SSH SIGNATURE-----\n"
   }
 ]
