@@ -188,6 +188,20 @@ pub struct Queued {
     /// BACKLOG 326: its place is an expedite's (`crate::expedite`): it runs alone, so a batch
     /// ends before it.
     pub expedite: bool,
+    /// G960: the machines whose run of its check gave no answer there (G811, G950).
+    pub unable: Vec<String>,
+}
+
+/// G960 (BACKLOG 372; found 2026-11-28 while fixing G954): a place whose check `machine` could
+/// not run (G811, G950) joins no batch a runner on `machine` checks. There, its unit's
+/// `infra_failure` turned the whole batch `unknown`. It is passed over and runs at its own turn,
+/// where a runner on another machine takes it (G954).
+pub fn pass_over_unable(machine: &str, line: &mut [Queued]) {
+    for queued in line {
+        if queued.unable.iter().any(|unable| unable == machine) {
+            queued.batchable = false;
+        }
+    }
 }
 
 impl Queued {
@@ -234,6 +248,7 @@ impl Queued {
                 matches!(op.state, OpState::Running | OpState::Checked) && op.unavailable.is_none()
             }),
             expedite: entry.expedite,
+            unable: op.unable.clone(),
         })
     }
 }
@@ -1751,8 +1766,8 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
 mod tests {
     use super::{
         BatchTag, Bisect, Fold, Footprint, Member, Observed, Own, Queued, Reads, Role,
-        checked_prefix, failure_rate, fold, judged_depth, list_reads, plan_batch, predict, roles,
-        slowest, tree_of,
+        checked_prefix, failure_rate, fold, judged_depth, list_reads, pass_over_unable, plan_batch,
+        predict, roles, slowest, tree_of,
     };
     use crate::git::Git;
 
@@ -1798,6 +1813,7 @@ mod tests {
             screen: None,
             holder: None,
             expedite: false,
+            unable: Vec::new(),
         }
     }
 
@@ -1822,6 +1838,24 @@ mod tests {
         assert!(members.is_empty());
         assert_eq!(stopped, "screen");
         assert_eq!(at.as_deref(), Some("change2"));
+    }
+
+    /// G960: a member whose check this machine could not run is passed over; one that only
+    /// another machine could not run joins the batch.
+    #[test]
+    fn a_member_this_machine_could_not_run_is_passed_over() {
+        let (_dir, git, trunk, revisions) = three_on_a_base();
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        let head = queued(1, &revisions[0], Vec::new());
+        let mut here = queued(2, &revisions[1], Vec::new());
+        here.unable = vec!["other-box".to_owned(), "this-box".to_owned()];
+        let mut there = queued(3, &revisions[2], Vec::new());
+        there.unable = vec!["other-box".to_owned()];
+        let mut behind = [here, there];
+        pass_over_unable("this-box", &mut behind);
+        let (members, ..) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
+        assert_eq!(seqs, [1, 3]);
     }
 
     /// Measured on 0.5.20 (2026-10-27): batches ended at a member that may not join one. It is

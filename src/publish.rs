@@ -3501,13 +3501,23 @@ fn read_line_fetched<'a>(
     repo: &Repo,
     entries: &[&'a crate::queue::Entry],
 ) -> (Vec<throughput::Queued>, Vec<&'a crate::queue::Entry>) {
-    let (line, unread) = throughput::read_line(&repo.git, entries.iter().copied());
-    if unread.is_empty() {
-        return (line, unread);
+    let (mut line, mut unread) = throughput::read_line(&repo.git, entries.iter().copied());
+    if !unread.is_empty() {
+        let changes: Vec<String> = unread.iter().map(|entry| entry.change.clone()).collect();
+        let _ = repo.remote_chains(&changes);
+        (line, unread) = throughput::read_line(&repo.git, entries.iter().copied());
     }
-    let changes: Vec<String> = unread.iter().map(|entry| entry.change.clone()).collect();
-    let _ = repo.remote_chains(&changes);
-    throughput::read_line(&repo.git, entries.iter().copied())
+    pass_over_unable(repo, &mut line);
+    (line, unread)
+}
+
+/// G960: [`throughput::pass_over_unable`] for this machine, so a batch it checks, its head's or
+/// one ahead, takes in no place whose check it could not run. Without a machine name, nothing
+/// changes.
+fn pass_over_unable(repo: &Repo, line: &mut [throughput::Queued]) {
+    if let Ok(machine) = crate::live::machine(&repo.git) {
+        throughput::pass_over_unable(&machine, line);
+    }
 }
 
 /// G712 (a fleet finding, 2026-11-13: a code change's batch took in two notes changes, each
@@ -3701,6 +3711,7 @@ fn batch_plan(
         screen: throughput::screened(&ctx.op(op_id).prechecks),
         holder: Some(ctx.executor_name()),
         expedite: false,
+        unable: Vec::new(),
     };
     let waiting = queue.behind(at);
     // G867: the chains and leases as the remote holds them now, so a place another runner took
@@ -3709,6 +3720,7 @@ fn batch_plan(
     let chains: Vec<String> = waiting.iter().map(|entry| entry.change.clone()).collect();
     let _ = repo.remote_chains(&chains);
     let (mut behind, unread) = throughput::read_line(git, waiting.iter().copied());
+    pass_over_unable(repo, &mut behind);
     let elsewhere = pass_over_held(ctx, &policy, trunk, &head, &mut behind)?;
     let mut passers = pass_over_passing(ctx, &queue, trunk, &mut behind)?;
     let by_lane = repo.config.footprint_lanes();
