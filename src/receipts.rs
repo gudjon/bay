@@ -243,11 +243,13 @@ fn sync_chains_seen(repo: &Repo, swept: Option<&Swept>) -> usize {
     let remote = if let Some(swept) = swept {
         Remote::Swept(swept)
     } else {
+        // G963: the shard indexes too, so a chain the remote lacks is known compacted or not.
         let Ok(listed) = repo.git.run(&[
             "ls-remote",
             repo.remote(),
             &format!("{changes}*"),
             &format!("{requests}*"),
+            &format!("{}*", crate::compact::INDEX_PREFIX),
         ]) else {
             return 0;
         };
@@ -257,7 +259,8 @@ fn sync_chains_seen(repo: &Repo, swept: Option<&Swept>) -> usize {
     // G615: each ref looked up by name, never by a scan of every line (about 3,000 chains
     // against a listing of 5,800 refs cost about a second a status).
     let held = by_name(&local, ' ');
-    let mut pushed = 0;
+    let mut wanted = Vec::new();
+    let mut lacking = Vec::new();
     for line in local.lines() {
         let Some((oid, name)) = line.split_once(' ') else {
             continue;
@@ -280,6 +283,24 @@ fn sync_chains_seen(repo: &Repo, swept: Option<&Swept>) -> usize {
         if let Some(tip) = on_remote
             && (remote.ahead(name) || !repo.git.is_ancestor(tip, oid).unwrap_or(false))
         {
+            continue;
+        }
+        if on_remote.is_none()
+            && let Remote::Listed(listed) = &remote
+            && listed.contains_key(crate::compact::index_ref(name).as_str())
+        {
+            lacking.push((name.to_owned(), oid.to_owned()));
+        }
+        wanted.push((id, name, oid));
+    }
+    // G963: a chain the remote lacks that its shard records was compacted, and goes from here
+    // too; while the shard cannot be read, it is not pushed. A sweep's chain the remote deleted
+    // went before this sync (`crate::status`, G921).
+    let compacted = crate::compact::forget_compacted(repo, &lacking)
+        .unwrap_or_else(|_| lacking.into_iter().map(|(name, _)| name).collect());
+    let mut pushed = 0;
+    for (id, name, oid) in wanted {
+        if compacted.contains(name) {
             continue;
         }
         let request_ref = format!("{requests}{id}");

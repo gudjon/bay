@@ -517,20 +517,48 @@ fn candidates(
 ///
 /// A git fault reading the shards, or a malformed record.
 pub fn forget(git: &Git, held: &[(String, String)]) -> Result<usize, String> {
+    forgotten(git, held).map(|gone| gone.len())
+}
+
+/// [`forget`], returning the names that went.
+fn forgotten(git: &Git, held: &[(String, String)]) -> Result<HashSet<String>, String> {
     let recorded = recorded_all(git, held.iter().map(|(name, _)| name.as_str()))?;
     let mut deletes = String::new();
-    let mut gone = 0;
+    let mut gone = HashSet::new();
     for (name, target) in held {
         if recorded.contains_key(name) {
             let _ = writeln!(deletes, "delete {name} {target}");
-            gone += 1;
+            gone.insert(name.clone());
         }
     }
-    if gone > 0 {
+    if !gone.is_empty() {
         git.run_with(&["update-ref", "--stdin"], &[], Some(deletes.as_bytes()))
             .map_err(|error| error.message())?;
     }
     Ok(gone)
+}
+
+/// G963 (a fleet finding, 2026-11-28: two runners of one repository pushed an empty shard commit
+/// about every 40 s, 1,366 pushes, each into a shard that already recorded the name it moved): the
+/// names of `lacking` (a chain here the remote does not hold, and its target here, each in a
+/// shard the remote holds) that the remote's shard records, [`forget`]ed here after one fetch of
+/// those shards. Each was compacted, and a compacted name is never created again (`crate::hook`);
+/// a sync that pushed it back put it on a host with no bay hook, and the next compaction moved
+/// it again.
+///
+/// # Errors
+///
+/// The shards cannot be fetched, or [`forget`] fails.
+pub fn forget_compacted(
+    repo: &Repo,
+    lacking: &[(String, String)],
+) -> Result<HashSet<String>, String> {
+    if lacking.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let indexes: BTreeSet<String> = lacking.iter().map(|(name, _)| index_ref(name)).collect();
+    fetch_indexes(repo, &indexes.into_iter().collect::<Vec<_>>())?;
+    forgotten(&repo.git, lacking)
 }
 
 /// G921: [`forget`]s each of `held` (a chain here and its target) the remote no longer holds,
