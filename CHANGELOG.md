@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.55
+
+- A name the hosted remote could not lock stays out of the store's compaction for 24 hours.
+- Before, one runner pushed that same compaction again and again, and the rest of its shard waited.
+- A batch takes in no place whose check this machine could not run; another machine runs it.
+
 ## 0.7.54
 
 - A check run again after a try that no worker answered takes an evidence id of its own.
