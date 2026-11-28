@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.54
+
+- A check run again after a try that no worker answered takes an evidence id of its own.
+- Before, that try failed on every pass: two different records under one evidence id.
+
 ## 0.7.53
 
 - A unit that fails here is judged against the base run here, not a base pass from another machine.
