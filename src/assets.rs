@@ -744,10 +744,11 @@ fn fresh(place: &Path) -> bool {
 /// # Errors
 ///
 /// A manifest cannot be read, the program cannot be materialized, or the plugin cannot answer:
-/// unknown is never held.
-pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<String>, String> {
-    let before = manifest_at(&repo.git, trunk)?;
-    let added: Vec<Entry> = manifest_at(&repo.git, tree)?
+/// unknown is never held ([`Unanswered`]).
+pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<String>, Unanswered> {
+    let before = manifest_at(&repo.git, trunk).map_err(Unanswered::Tree)?;
+    let added: Vec<Entry> = manifest_at(&repo.git, tree)
+        .map_err(Unanswered::Tree)?
         .into_iter()
         .filter(|entry| !before.contains(entry))
         .collect();
@@ -758,7 +759,7 @@ pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<Str
         return Ok(added.into_iter().map(|entry| entry.path).collect());
     };
     let timeout = Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S));
-    let id = crate::ids::new_change_id().map_err(|error| error.to_string())?;
+    let id = crate::ids::new_change_id().map_err(|error| Unanswered::Machine(error.to_string()))?;
     let scratch = repo
         .common_dir
         .join("bay")
@@ -771,7 +772,8 @@ pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<Str
         &assets.command,
         &scratch,
         std::time::Instant::now() + timeout,
-    )?;
+    )
+    .map_err(Unanswered::Tree)?;
     let plugin = Plugin {
         work_root: &scratch,
         command: &assets.command,
@@ -780,11 +782,21 @@ pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<Str
     };
     let mut missing = Vec::new();
     for entry in added {
-        if !plugin.exists(&entry.id)? {
+        if !plugin.exists(&entry.id).map_err(Unanswered::Machine)? {
             missing.push(entry.path);
         }
     }
     Ok(missing)
+}
+
+/// Why [`not_held_at_merge`] has no answer.
+#[derive(Debug)]
+pub enum Unanswered {
+    /// A manifest, or the plugin's program, as the trees hold them: every machine reads the same.
+    Tree(String),
+    /// G956: this machine's run of the plugin (its process, the store's credentials here, its
+    /// answer): a plugin on another machine may answer.
+    Machine(String),
 }
 
 /// What [`fill`] did: the files it wrote, and those the store purged (named, never written).

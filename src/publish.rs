@@ -523,10 +523,15 @@ fn blocked_elsewhere(id: &str, op: &Operation) -> BayResult {
         None => BayResult::new(Decision::Ok),
     };
     result.state = Some("blocked".to_owned());
+    let mut detail = json!({"unchanged": true, "condition": op.blocked_on, "owner": op.owner});
+    // G956 (BACKLOG 375): the block's why, as the visit that blocked it named it.
+    if let Some(why) = &op.blocked_why {
+        detail["why"] = json!(why);
+    }
     result
         .with_change(id)
         .with_op(&op.op_id)
-        .with_detail(json!({"unchanged": true, "condition": op.blocked_on, "owner": op.owner}))
+        .with_detail(detail)
 }
 
 /// `land --wait` with an observation timeout (§ 9a): the run happens in a detached process,
@@ -4458,6 +4463,7 @@ fn persist_each<'a>(
                 op.outcome = None;
                 op.blocked_on = None;
                 op.checked_on = None;
+                op.blocked_why = None;
             },
         )?;
         if !matches!(persisted, Persisted::Pushed) {
@@ -7157,6 +7163,7 @@ fn retry_blocked(
     let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
     let then = op.blocked_on.clone();
     let checked_on = op.checked_on.clone();
+    let blocked_why = op.blocked_why.clone();
     // N-9: a failed or unanswered check of a policy with a waivable check may get a waiver.
     let waivable = waivable_block(ctx, op_id, reason)?;
     // G245: the approval it waits on is written on another machine and reaches this one only
@@ -7213,6 +7220,10 @@ fn retry_blocked(
         {
             detail["checked_on"] = json!(machine);
         }
+        // G956 (BACKLOG 375): an unchanged retry runs nothing, so it repeats the block's why.
+        if let Some(why) = blocked_why {
+            detail["why"] = json!(why);
+        }
         return Ok(Some(
             BayResult::blocked(reason)
                 .with_change(ctx.id.clone())
@@ -7225,6 +7236,7 @@ fn retry_blocked(
     op.outcome = None;
     op.blocked_on = None;
     op.checked_on = None;
+    op.blocked_why = None;
     op.unavailable = None;
     op.trunk_moved = 0;
     ctx.save_or_moved(revision, None, &format!("rearmed {op_id}"))?;
@@ -7671,6 +7683,7 @@ fn submit(ctx: &mut Ctx, revision: &str, expedite: Option<&str>) -> Result<Strin
         kept: None,
         unable: Vec::new(),
         checked_on: None,
+        blocked_why: None,
         unavailable: None,
         early_conflict: None,
         undoes: None,
@@ -8518,7 +8531,8 @@ fn lock_not_held(
 /// `ASSET_MISSING` at candidate build (BACKLOG 49, owner ruling 2026-10-24): the merged `tree`'s
 /// `.bay-assets` adds lines whose bytes the assets plugin does not hold (`exists`), or the
 /// plugin cannot say. A merge would name bytes no store keeps, so the operation is blocked, as
-/// on a conflict; no candidate is committed and no check runs.
+/// on a conflict; no candidate is committed and no check runs. G956: a plugin that could not
+/// answer on this machine leaves the operation to another machine first ([`asked_elsewhere`]).
 fn asset_missing(
     ctx: &mut Ctx,
     op_id: &str,
@@ -8526,11 +8540,21 @@ fn asset_missing(
     trunk: &str,
     tree: &str,
 ) -> Result<Option<BayResult>, String> {
+    use crate::assets::Unanswered;
     let repo = ctx.repo;
-    let detail = match crate::assets::not_held_at_merge(repo, trunk, tree) {
+    let (detail, why) = match crate::assets::not_held_at_merge(repo, trunk, tree) {
         Ok(paths) if paths.is_empty() => return Ok(None),
-        Ok(paths) => json!({"paths": paths, "main": trunk}),
-        Err(why) => json!({"why": why, "main": trunk}),
+        Ok(paths) => {
+            let why = unheld(&paths);
+            (json!({"paths": paths, "main": trunk}), why)
+        }
+        Err(Unanswered::Machine(why)) => {
+            if let Some(waiting) = asked_elsewhere(ctx, op_id, revision, trunk, &why) {
+                return Ok(Some(waiting));
+            }
+            (json!({"why": why, "main": trunk}), why)
+        }
+        Err(Unanswered::Tree(why)) => (json!({"why": why, "main": trunk}), why),
     };
     let condition = condition(
         &repo.git,
@@ -8543,6 +8567,7 @@ fn asset_missing(
     op.state = OpState::Blocked;
     op.outcome = Some(Reason::AssetMissing.code().to_owned());
     op.blocked_on = Some(condition);
+    op.blocked_why = Some(why);
     ctx.save(revision, None, "blocked: asset missing")?;
     ctx.push_chain();
     Ok(Some(
@@ -8551,6 +8576,65 @@ fn asset_missing(
             .with_op(op_id)
             .with_detail(detail),
     ))
+}
+
+/// G956: an `ASSET_MISSING` block's why in one line: the first files whose bytes no store holds.
+fn unheld(paths: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let shown = paths
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match paths.len().saturating_sub(SHOWN) {
+        0 => format!("the store does not hold the bytes of {shown}"),
+        more => format!("the store does not hold the bytes of {shown} and {more} more"),
+    }
+}
+
+/// G956 (BACKLOG 374; a fleet finding, 2026-11-28: on a machine that held no credential for the
+/// store, a runner's assets plugin exited 2 for `exists`, and the change was blocked
+/// `ASSET_MISSING` there, a fault of that machine, not of the change): a plugin that could not
+/// answer on this machine leaves the operation to a live runner on another machine that serves
+/// the environments the change needs, once per machine, as a check that gave no answer here does
+/// (G950): a runner here then passes it over ([`waits_for_worker`]). `None` for a placing
+/// visit, a machine that left it once already, a change whose environments cannot be read or
+/// that runs no check, or no such runner: blocked, as before.
+fn asked_elsewhere(
+    ctx: &Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    why: &str,
+) -> Option<BayResult> {
+    if ctx.visit == Visit::Place {
+        return None;
+    }
+    let machine = crate::live::machine(&ctx.repo.git).ok()?;
+    let unable = &ctx.op(op_id).unable;
+    if unable.contains(&machine) {
+        return None;
+    }
+    let mut environments = required_environments(ctx, revision, trunk)?;
+    environments.sort();
+    environments.dedup();
+    if environments.is_empty() || !live_runner_elsewhere(ctx, &machine, unable, &environments) {
+        return None;
+    }
+    let mut waiting = unavailable(
+        ctx,
+        op_id,
+        &environments,
+        Some(&format!(
+            "this machine ({machine}) could not ask the assets plugin, and a live runner on another machine takes it: {why}"
+        )),
+    );
+    if let Some(detail) = waiting.detail.as_mut() {
+        detail["machine"] = json!(machine);
+        detail["why"] = json!(why);
+    }
+    Some(waiting)
 }
 
 /// `UNDOES_MERGED` at candidate build (BACKLOG 64 F1, owner ruling 2026-10-24): a change written
@@ -8880,7 +8964,11 @@ fn build_and_check(
             return Ok(Err(refusal));
         }
         // BACKLOG 49: the bytes a change's manifest names are in the store before it merges.
+        // G956: a machine whose plugin could not answer waits for a runner on another one.
         if let Some(refusal) = asset_missing(ctx, op_id, revision, trunk, &tree)? {
+            if refusal.reason == Some(Reason::CheckUnavailable) {
+                return wait_for_worker(ctx, op_id, revision, refusal).map(Err);
+            }
             return Ok(Err(refusal));
         }
         // BACKLOG 64 F1: no change silently puts back what another merged after it began.

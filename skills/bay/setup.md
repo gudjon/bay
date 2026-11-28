@@ -222,7 +222,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    the folder; never add it by hand. Other clones get it at `bay install`, views and checks
    when they are made. bay ships a store for any folder or shared drive:
    `examples/assets/folder-store`, named as `command = "scripts/folder-store <folder>"`. A merge
-   whose large files the store does not hold is refused `ASSET_MISSING`: save them again. A file the
+   whose large files the store does not hold is refused `ASSET_MISSING`: save them again. A runner whose
+   plugin cannot ask the store leaves the change to a runner on another machine. A file the
    store purged keeps its line in `.bay-assets`; a clone names it and goes on. To let a store drop
    generated files after a time, add `[assets] keep = [{ paths = "renders/", days = 30 }]` to the policy.
    To stop any purge of files that must be kept (a legal hold), add `hold = ["matters/acme/"]`: a file

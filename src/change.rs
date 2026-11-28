@@ -471,6 +471,10 @@ pub struct Operation {
     /// blocked `CHECK_UNKNOWN`, so an unchanged retry that refuses it again names it too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked_on: Option<String>,
+    /// G956 (BACKLOG 375): the why of a block, in one line, as the refusal named it, while the
+    /// operation is blocked, so an unchanged retry, which runs nothing, repeats it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_why: Option<String>,
     /// Set while the operation waits behind the queue's head and its revision does not merge
     /// onto trunk (G177): what the executor's early probe found. The operation keeps its
     /// place; its own merge, once it is head, still decides.
