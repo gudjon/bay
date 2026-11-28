@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.52
+
+- A machine whose assets plugin cannot ask the store leaves the change to a runner on another machine.
+- A blocked change sent again unchanged repeats why it was blocked.
+
 ## 0.7.51
 
 - A machine that sets `bay.checkCpus` runs each check on those CPUs alone, and each record names the list.
