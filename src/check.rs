@@ -1730,18 +1730,23 @@ fn run_serial(
             .as_ref()
             .filter(|_| entry.baseline.is_some() && judged.verdict == Verdict::ProductFailure)
         {
-            let answer = base_answer(
+            let (answer, passed_elsewhere) = base_answer(
                 git,
                 policy,
                 candidate,
                 producer,
                 limits,
                 hooks,
-                (index, entry),
+                (index, entry, &failed_ids_of(&judged.units)),
                 (work_dir, started),
                 (base, &mut *on_base),
             )?;
-            compared = Some(against_base(&mut judged, answer, &base.commit));
+            let mut stated = against_base(&mut judged, answer, &base.commit);
+            // G957: the base record another producer made, set aside for a run here.
+            if let Some(id) = passed_elsewhere {
+                stated["passed_elsewhere"] = json!(id);
+            }
+            compared = Some(stated);
         }
         let mut record = evidence(
             candidate,
@@ -1821,8 +1826,12 @@ fn answers_units(record: &EvidenceRecord, units: &[String]) -> bool {
 
 /// The ids of the units `record` failed, sorted and once each: what its check's next rerun asks.
 fn failed_ids(record: &EvidenceRecord) -> Vec<String> {
-    let mut ids: Vec<String> = record
-        .units
+    failed_ids_of(&record.units)
+}
+
+/// The ids of the `units` that failed, sorted and once each.
+fn failed_ids_of(units: &[Unit]) -> Vec<String> {
+    let mut ids: Vec<String> = units
         .iter()
         .filter(|unit| unit.verdict == Verdict::ProductFailure)
         .map(|unit| unit.id.clone())
@@ -2160,6 +2169,13 @@ fn answers_on_base(
 /// one per candidate. The inner error says why the base has no answer at all (no worker ran
 /// it).
 ///
+/// G957 (BACKLOG 376; a fleet finding, 2026-11-28: a unit that reads the host's fonts failed
+/// on a machine that has none, on the candidate and on its base, while the base's record came
+/// from a machine that has them; the failure counted as new and the change was refused
+/// `CHECK_FAILED`): a record another producer made is reused only when it fails each unit the
+/// candidate's run failed (`failing`). A record that passes one of them may pass it only on
+/// its own machine, so the base is run here, and the second value names that record.
+///
 /// # Errors
 ///
 /// A git fault, the base cannot be materialized, or `keep` fails.
@@ -2171,18 +2187,24 @@ fn base_answer(
     producer: &str,
     limits: &Limits,
     hooks: &mut Hooks,
-    (index, entry): (usize, &CheckEntry),
+    (index, entry, failing): (usize, &CheckEntry, &[String]),
     (work_dir, started): (&Path, Instant),
     (base, on_base): (&Baseline, &mut Vec<EvidenceRecord>),
-) -> Result<Result<EvidenceRecord, String>, String> {
+) -> Result<(Result<EvidenceRecord, String>, Option<String>), String> {
     // G815: the base answers the units main's red failed too, so a candidate that still fails
     // them is judged no worse than main.
     let asked = asked_of(limits, entry);
-    if let Some(found) = on_base.iter().chain(&base.records).find(|record| {
-        answers_on_base(record, policy, candidate, entry, &base.commit)
-            && answers_units(record, asked)
-    }) {
-        return Ok(Ok(found.clone()));
+    let mut passed_elsewhere = None;
+    for record in on_base.iter().chain(&base.records) {
+        if !answers_on_base(record, policy, candidate, entry, &base.commit)
+            || !answers_units(record, asked)
+        {
+            continue;
+        }
+        if record.producer.name == producer || fails_each(record, failing) {
+            return Ok((Ok(record.clone()), None));
+        }
+        passed_elsewhere.get_or_insert_with(|| record.id.clone());
     }
     // The base is checked as it was landed: against its own first parent, so an adapter that
     // selects by `changed_paths` selects what it did then. A root commit changes every path.
@@ -2228,10 +2250,13 @@ fn base_answer(
         (work_dir, started, &about(git, &on)?),
     )?;
     if let Some(reason) = judged.unavailable.take() {
-        return Ok(Err(format!(
-            "no worker ran the check on the base {}: {reason}",
-            base.commit
-        )));
+        return Ok((
+            Err(format!(
+                "no worker ran the check on the base {}: {reason}",
+                base.commit
+            )),
+            passed_elsewhere,
+        ));
     }
     // The base's run is whole: its own failures are what the candidate is compared with.
     judged.excused = None;
@@ -2250,7 +2275,18 @@ fn base_answer(
     );
     (hooks.keep)(&mut record)?;
     on_base.push(record.clone());
-    Ok(Ok(record))
+    Ok((Ok(record), passed_elsewhere))
+}
+
+/// G957: whether `record` fails each of `units`: then it explains every failure of a run that
+/// failed them, whichever machine it was made on.
+fn fails_each(record: &EvidenceRecord, units: &[String]) -> bool {
+    units.iter().all(|id| {
+        record
+            .units
+            .iter()
+            .any(|unit| unit.id == *id && unit.verdict == Verdict::ProductFailure)
+    })
 }
 
 /// The tree of `commit`.
