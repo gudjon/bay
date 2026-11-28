@@ -9803,7 +9803,7 @@ fn run_policy(
                 asked: ctx.red_checks.clone(),
                 heartbeat: Some(ctx.repo.config.heartbeat()),
                 hidden: hidden_paths(ctx),
-                sandbox: check::Sandbox::here().reading(git),
+                sandbox: check::Sandbox::here().of_box(git),
                 baseline: baseline.clone(),
                 parallel: ctx.repo.parallel_checks(),
                 halt: halt.clone(),

@@ -885,8 +885,8 @@ fn check_in(dir: &Path, command: &str, test: &Test, scratch: &Path) -> Result<Ba
     std::fs::create_dir_all(&work).map_err(|error| format!("{}: {error}", work.display()))?;
     let git = Git::new(&work);
     git_ok(&git, &["init", "-q"])?;
-    // G285: the box's read paths, as an executor of this box binds them.
-    let sandbox = sandbox.reading(&git);
+    // G285, G955: the box's read paths and CPU list, as an executor of this box uses them.
+    let sandbox = sandbox.of_box(&git);
     if let Some(why) = &sandbox.refusal {
         return Err(why.clone());
     }

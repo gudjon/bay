@@ -285,7 +285,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     // repository.
     let runs_checks = executor || keys.executor.is_some() || keys.producer.is_some();
     sandbox_row(&crate::check::Sandbox::here(), runs_checks, &mut report);
-    read_paths_row(&git, &mut report);
+    box_check_rows(&git, &mut report);
 
     let ready = report.first_red.is_none();
     let line = status_line(
@@ -1787,6 +1787,12 @@ fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut 
     report.rows.push(row);
 }
 
+/// G285, G955: the rows of what the box sets for its checks: its read paths and its CPU list.
+fn box_check_rows(git: &Git, report: &mut Report) {
+    read_paths_row(git, report);
+    check_cpus_row(git, report);
+}
+
 /// G285: the `check-read-paths` row: the box's read-only paths for checks
 /// (`bay.checkReadPath`), each with whether it exists. A path that does not exist, or a value
 /// that is not absolute (every check is then refused, naming it), is degraded. No row when
@@ -1820,6 +1826,47 @@ fn read_paths_row(git: &Git, report: &mut Report) {
         Err(why) => json!({"name": "check-read-paths", "key": key, "state": "degraded",
             "note": why,
             "recovery": format!("set each value to an absolute path or one starting with ~/: git config --global --replace-all {key} <path>")}),
+    };
+    report.rows.push(row);
+}
+
+/// G955: the `check-cpus` row: the box's CPU list for checks (`bay.checkCpus`) and `count`, how
+/// many of its CPUs this process may run on (a runner under a supervisor may have other CPUs;
+/// its checks get the list's CPUs among its own). Degraded when this machine cannot pin a check
+/// to the list (every check is then refused, naming it), or none of its CPUs is one this
+/// process may run on (a check then cannot start). No row when the box sets none.
+fn check_cpus_row(git: &Git, report: &mut Report) {
+    let key = crate::check::CPUS_KEY;
+    let recovery = format!(
+        "set a CPU list, as 0-5,12-17: git config --global {key} <list>; or unset it: git config \
+         --global --unset {key}"
+    );
+    let row = match crate::check::check_cpus(git)
+        .and_then(|cpus| cpus.map(crate::check::pinnable).transpose())
+    {
+        Ok(None) => return,
+        Ok(Some(cpus)) => {
+            let listed = crate::check::cpu_list(&cpus).unwrap_or_default();
+            match crate::check::own_cpus() {
+                Some(own) => {
+                    let count = listed.iter().filter(|cpu| own.contains(cpu)).count();
+                    let mut row = json!({"name": "check-cpus", "key": key, "cpus": cpus,
+                        "count": count, "state": if count == 0 { "degraded" } else { "green" }});
+                    if count == 0 {
+                        row["note"] = json!(
+                            "no CPU of the list is one this process may run on: a check cannot start"
+                        );
+                        row["recovery"] = json!(recovery);
+                    }
+                    row
+                }
+                None => json!({"name": "check-cpus", "key": key, "cpus": cpus,
+                    "state": "degraded",
+                    "note": "the CPUs this process may run on could not be read in /proc/self/status"}),
+            }
+        }
+        Err(why) => json!({"name": "check-cpus", "key": key, "state": "degraded", "note": why,
+            "recovery": recovery}),
     };
     report.rows.push(row);
 }

@@ -244,6 +244,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    nothing. Tell the user that command. `--print` only shows it.
 7. A check that must read a directory outside its tree (a package store) needs it named on the
    machine that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
+8. On Linux, a machine whose checks must leave CPUs to other work keeps them on a CPU list:
+   `git config --global bay.checkCpus 8-11,20-23`. Each record names the list; `bay doctor` counts it.
 
 ## Serve a fleet from an origin (only when the user asks)
 

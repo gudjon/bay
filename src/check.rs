@@ -615,9 +615,13 @@ pub struct Sandbox {
     pub refusal: Option<String>,
     /// G285: the box's read-only paths for checks (`bay.checkReadPath`), absolute. Box facts:
     /// they never enter the definition digest, and each record of a sandboxed run lists them
-    /// ([`SANDBOX_READ`]). The developer tools ([`Sandbox::tools`]) until [`Sandbox::reading`]
+    /// ([`SANDBOX_READ`]). The developer tools ([`Sandbox::tools`]) until [`Sandbox::of_box`]
     /// adds the box's.
     pub read: Vec<PathBuf>,
+    /// G955: the box's CPU list for checks ([`CPUS_KEY`]): each check runs on those CPUs alone
+    /// ([`pinned`]), and its record names the list ([`CHECK_CPUS`]). A box fact, as `read` is.
+    /// `None` until [`Sandbox::of_box`] reads one.
+    pub cpus: Option<String>,
     /// On macOS, the active developer directory's `usr`, whose programs the `/usr/bin` shims
     /// (`git`, `make`, `cc`, …) start ([`developer_tools`]): readable in the sandbox, and its
     /// `bin` ahead of `/usr/bin` on a check's `PATH` ([`check_path`]).
@@ -658,16 +662,25 @@ impl Sandbox {
             kind,
             refusal,
             read: tools.iter().cloned().collect(),
+            cpus: None,
             tools,
         }
     }
 
-    /// G285: the sandbox with the box's read paths, as `git` reads `bay.checkReadPath`. A value
-    /// that is not absolute once a leading `~/` is expanded refuses every check, naming it.
+    /// The sandbox with the box's settings for checks, as `git` reads them: its read paths
+    /// (`bay.checkReadPath`, G285) and its CPU list (`bay.checkCpus`, G955). A read path that is
+    /// not absolute once a leading `~/` is expanded refuses every check, naming it; so does a CPU
+    /// list this machine cannot pin a check to ([`pinnable`]).
     #[must_use]
-    pub fn reading(mut self, git: &Git) -> Self {
+    pub fn of_box(mut self, git: &Git) -> Self {
         match read_paths(git) {
             Ok(paths) => self.read.extend(paths),
+            Err(why) => {
+                self.refusal.get_or_insert(why);
+            }
+        }
+        match check_cpus(git).and_then(|cpus| cpus.map(pinnable).transpose()) {
+            Ok(cpus) => self.cpus = cpus,
             Err(why) => {
                 self.refusal.get_or_insert(why);
             }
@@ -772,6 +785,120 @@ pub fn read_paths(git: &Git) -> Result<Vec<PathBuf>, String> {
             error.message()
         )),
     }
+}
+
+/// G955: the box's CPUs for checks: a CPU list as `taskset -c` reads it (`8-11,20-23`), Git
+/// config, global or for one clone, read as [`READ_PATH_KEY`] is. Each check runs under
+/// `taskset -c <list>` ([`pinned`]), so the check and every process it starts run on those CPUs
+/// alone, and a test runner that sizes its threads from the CPUs it may use (`cargo`, `nextest`)
+/// sizes them to the list. The runner keeps its own CPUs. Linux only.
+pub const CPUS_KEY: &str = "bay.checkCpus";
+
+/// G955: the record field, next to `sandbox`, that names the CPU list ([`CPUS_KEY`]) the check
+/// ran on. Kept in [`EvidenceRecord::unknown`]; absent when the box sets none.
+pub const CHECK_CPUS: &str = "check_cpus";
+
+/// The highest CPU number a CPU list may name: a bound on what one value can make bay count.
+const CPU_MAX: u32 = 4095;
+
+/// G955: the CPUs of `list`, a CPU list as `taskset -c` reads it: CPU numbers and ranges `a-b`
+/// with `a <= b`, separated by commas (`0-5,12-17`). Sorted, each once.
+///
+/// # Errors
+///
+/// An empty list, or an item that is not a CPU number or such a range.
+pub fn cpu_list(list: &str) -> Result<Vec<u32>, String> {
+    let bad = || {
+        format!(
+            "{CPUS_KEY} = \"{list}\" is not a CPU list; write CPU numbers and ranges, as 0-5,12-17"
+        )
+    };
+    let number = |text: &str| {
+        (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<u32>().ok())
+            .flatten()
+            .filter(|cpu| *cpu <= CPU_MAX)
+    };
+    let mut cpus = Vec::new();
+    for item in list.split(',') {
+        let (from, to) = item.split_once('-').unwrap_or((item, item));
+        match (number(from), number(to)) {
+            (Some(from), Some(to)) if from <= to => cpus.extend(from..=to),
+            _ => return Err(bad()),
+        }
+    }
+    cpus.sort_unstable();
+    cpus.dedup();
+    Ok(cpus)
+}
+
+/// G955: the box's CPU list for checks ([`CPUS_KEY`]) as `git config --get` reads it in `git`'s
+/// clone, a CPU list by [`cpu_list`]. Unset is `None`.
+///
+/// # Errors
+///
+/// A value that is not a CPU list, or a `git config` that fails.
+pub fn check_cpus(git: &Git) -> Result<Option<String>, String> {
+    match git.run_status(&["config", "--get", CPUS_KEY]) {
+        // `git config --get` exits 1 for a key that is not set.
+        Ok((1, _, _)) => Ok(None),
+        Ok((0, value, _)) => {
+            let value = value.trim();
+            cpu_list(value)?;
+            Ok(Some(value.to_owned()))
+        }
+        Ok((_, _, stderr)) => Err(format!("{CPUS_KEY} could not be read: {stderr}")),
+        Err(error) => Err(format!("{CPUS_KEY} could not be read: {}", error.message())),
+    }
+}
+
+/// G955: `cpus`, when this machine can run a check on them: Linux, with `taskset` on bay's own
+/// `PATH`.
+///
+/// # Errors
+///
+/// This machine is not Linux, or has no `taskset`.
+pub(crate) fn pinnable(cpus: String) -> Result<String, String> {
+    if !cfg!(target_os = "linux") {
+        return Err(format!(
+            "{CPUS_KEY} = \"{cpus}\" is set, and bay pins a check's CPUs on Linux only; unset it \
+             on this machine"
+        ));
+    }
+    if !on_path("taskset").is_absolute() {
+        return Err(format!(
+            "{CPUS_KEY} = \"{cpus}\" is set, and this machine has no taskset (util-linux) on \
+             bay's PATH"
+        ));
+    }
+    Ok(cpus)
+}
+
+/// G955: the CPUs this process may run on, as `Cpus_allowed_list` in `/proc/self/status`
+/// names them. `None` where there is no such file.
+pub(crate) fn own_cpus() -> Option<Vec<u32>> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let list = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))?;
+    cpu_list(list.trim()).ok()
+}
+
+/// G955: `cmd` started under `taskset -c cpus`, which sets its own CPU affinity and then becomes
+/// `cmd`, so the sandbox and the check inherit it; `cmd` as it is when `cpus` is `None`.
+/// Called on a command from [`sandboxed`], before it has an environment or a working
+/// directory, which this does not carry over.
+fn pinned(cmd: Command, cpus: Option<&str>) -> Command {
+    let Some(cpus) = cpus else {
+        return cmd;
+    };
+    let mut pinned = Command::new(on_path("taskset"));
+    pinned
+        .arg("-c")
+        .arg(cpus)
+        .arg(cmd.get_program())
+        .args(cmd.get_args());
+    pinned
 }
 
 /// G285: why a box read path is not bound: it lies inside a path a check never reads (the
@@ -1827,6 +1954,7 @@ fn run_once(
         hidden: &limits.hidden,
         sandbox: limits.sandbox.kind,
         read: &limits.sandbox.read,
+        cpus: limits.sandbox.cpus.as_deref(),
         about,
         history: history.as_ref(),
         paths_tree: kept.as_deref(),
@@ -1898,7 +2026,7 @@ impl AdapterRun {
 /// The evidence record of run `run` of the check `entry`, the `index`th of `policy`, judged
 /// `judged` on `candidate` by `producer` in a run that started at `ran` under `sandbox`. A
 /// sandboxed run lists its read paths in [`SANDBOX_READ`] (G285); with no sandbox nothing is
-/// read-only, so it lists none.
+/// read-only, so it lists none. A run on the box's CPU list names it in [`CHECK_CPUS`] (G955).
 fn evidence(
     candidate: &Candidate,
     producer: &str,
@@ -1920,6 +2048,9 @@ fn evidence(
                     .collect::<Vec<_>>()
             ),
         );
+    }
+    if let Some(cpus) = &sandbox.cpus {
+        unknown.insert(CHECK_CPUS.to_owned(), json!(cpus));
     }
     // Items 1 and 2: what the run read and listed, the record's observed footprint.
     if let Some(stamp) = judged.observed {
@@ -2284,6 +2415,8 @@ struct Place<'a> {
     sandbox: &'a str,
     /// G285: the box's read paths (`bay.checkReadPath`), bound read-only where they exist.
     read: &'a [PathBuf],
+    /// G955: the box's CPU list (`bay.checkCpus`), the only CPUs the check runs on.
+    cpus: Option<&'a str>,
     /// The request's `base`, `change` and `messages` ([`about`]).
     about: &'a serde_json::Map<String, serde_json::Value>,
     /// The read-only history of a check with `inputs = ["history"]`.
@@ -2432,7 +2565,7 @@ fn run_one(
     // this box is not bound (`bwrap` refuses to bind a missing path; `bay doctor` names it).
     let mut read_only = place.history.map(History::read_only).unwrap_or_default();
     read_only.extend(place.read.iter().filter(|path| path.exists()).cloned());
-    let mut cmd = match sandboxed(
+    let cmd = match sandboxed(
         place.sandbox,
         &executable,
         &args,
@@ -2443,6 +2576,8 @@ fn run_one(
         Ok(cmd) => cmd,
         Err(why) => return Judged::without_units(Verdict::InfraFailure, Some(why)),
     };
+    // G955: the box's CPUs, for the check and every process it starts.
+    let mut cmd = pinned(cmd, place.cpus);
     // `INTERFACES` § 7: the check starts from a fixed baseline and nothing else, so evidence
     // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
     // sandbox's scratch (`TMPDIR` at a short path under `bwrap`, G948), `LANG=C.UTF-8`, bay's
