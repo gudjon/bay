@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.50
+
+- A machine that could not run a check leaves it to another machine, also once its wait ended.
+- A machine that could not run a check is never the one it is handed back to.
+
 ## 0.7.49
 
 - A post check one machine cannot run, as a unit's `infra_failure`, goes to a live runner on another machine.
