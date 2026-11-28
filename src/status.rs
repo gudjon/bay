@@ -62,8 +62,9 @@ pub fn default_deadline() -> Duration {
 #[must_use]
 pub fn status(dir: &Path, change: Option<&str>, deadline: Duration) -> BayResult {
     if deadline.is_zero()
-        && let Some(saved) = from_store(dir, change)
+        && let Some(mut saved) = from_store(dir, change)
     {
+        trim_outside_own_checkout(dir, change, &mut saved);
         return saved;
     }
     if change.is_none()
@@ -71,12 +72,66 @@ pub fn status(dir: &Path, change: Option<&str>, deadline: Duration) -> BayResult
         && let Some(mut saved) = saved_listing(dir, deadline)
     {
         unchanged(dir, change, &mut saved);
+        trim_outside_own_checkout(dir, change, &mut saved);
         return saved;
     }
     let mut result = run(dir, change, deadline).unwrap_or_else(BayResult::failed);
     crate::saved::refreshed(dir, change);
     unchanged(dir, change, &mut result);
+    trim_outside_own_checkout(dir, change, &mut result);
     result
+}
+
+/// G962 (BACKLOG 284, ruling 2026-11-28; measured on a 13.6 KB listing read in a linked
+/// worktree: flakes 3.5 KB, targets 1.7 KB): a listing read in a linked worktree, not in its
+/// store's own checkout, keeps of the flake rows the ones that flaked, and of each promotion
+/// target its decision (`name`, `from`, `lag`, `promotable.commit`). `detail.trimmed` counts
+/// what it left out and names the checkout that shows it whole. An agent there reads the listing
+/// for its own changes, every time. A view's read is of one change and shows neither (G748);
+/// `flow` stays whole everywhere, as a panel reads it in a linked worktree.
+fn trim_outside_own_checkout(dir: &Path, change: Option<&str>, result: &mut BayResult) {
+    if change.is_some() || crate::saved::own_checkout(dir).is_some() {
+        return;
+    }
+    // A failed read's detail may be no listing at all: only its own sections are trimmed.
+    let (Some((_, common)), Some(detail)) = (
+        crate::saved::checkout(dir),
+        result.detail.as_mut().and_then(Value::as_object_mut),
+    ) else {
+        return;
+    };
+    let mut quiet = 0;
+    if let Some(rows) = detail.get_mut("flakes").and_then(Value::as_array_mut) {
+        let before = rows.len();
+        rows.retain(|row| row["flaky"].as_u64().is_some_and(|flaky| flaky > 0));
+        quiet = before - rows.len();
+    }
+    let mut targets = 0;
+    if let Some(rows) = detail.get_mut("targets").and_then(Value::as_array_mut) {
+        for row in rows.iter_mut().filter(|row| row.get("unread").is_none()) {
+            targets += 1;
+            *row = json!({
+                "name": row["name"],
+                "from": row["from"],
+                "lag": row["lag"],
+                "promotable": {"commit": row["promotable"]["commit"]},
+            });
+        }
+    }
+    if quiet == 0 && targets == 0 {
+        return;
+    }
+    let whole_in = common
+        .parent()
+        .filter(|_| common.file_name() == Some(std::ffi::OsStr::new(".git")));
+    detail.insert(
+        "trimmed".to_owned(),
+        json!({
+            "flakes_quiet": quiet,
+            "targets": targets,
+            "whole_in": whole_in.map(|root| root.display().to_string()),
+        }),
+    );
 }
 
 /// The file in a session's state that keeps what its last status reads found (G776).
