@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.56
+
+- Through a pipe, bay writes its plain copy on stderr only when stderr is a terminal.
+- A listing read in a linked worktree keeps the flake rows that flaked and each target's decision.
+- A runner no longer pushes back a chain that another runner moved into its shard.
+- Before, two runners of one repository pushed an empty shard commit about every 40 seconds.
+
 ## 0.7.55
 
 - A name the hosted remote could not lock stays out of the store's compaction for 24 hours.
