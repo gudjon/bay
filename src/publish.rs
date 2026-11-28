@@ -9811,6 +9811,8 @@ fn run_policy(
         return Ok(("unknown", Some(unavailable(ctx, op_id, &missing, None))));
     }
     let mut keep = |record: &mut evidence::EvidenceRecord| -> Result<(), String> {
+        // G958: a run again of a check an earlier try of this candidate kept a record of.
+        record.id = evidence::unused_id(git, &producer, record)?;
         // The producer signs outside the check's sandbox, after reading its output (§ 7).
         if let Some(signer) = &producer_signer {
             record.sign(&signer.key)?;

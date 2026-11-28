@@ -440,6 +440,31 @@ pub fn writing() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// G958: the id `record` takes in `producer`'s note on its subject tree: its own when no record
+/// there holds it, else its own with `-again-<n>` for the first free `n`. A try of a candidate
+/// that ended with no answer (`CHECK_UNAVAILABLE`) pushes nothing, but the records it kept stay
+/// in this clone, and the next try runs again each check they do not answer: that run is a run
+/// of its own, so no two runs share an id (G29) and both stay on the tree.
+///
+/// # Errors
+///
+/// A git fault or an unreadable note.
+pub fn unused_id(git: &Git, producer: &str, record: &EvidenceRecord) -> Result<String, String> {
+    let held = producer_records(git, producer, &record.subject.tree)?;
+    let taken = |id: &str| held.iter().any(|existing| existing.id == id);
+    if !taken(&record.id) {
+        return Ok(record.id.clone());
+    }
+    let mut again = 1u32;
+    loop {
+        let id = format!("{}-again-{again}", record.id);
+        if !taken(&id) {
+            return Ok(id);
+        }
+        again = again.saturating_add(1);
+    }
+}
+
 /// Appends `record` to `producer`'s note on its subject tree, under [`writing`].
 ///
 /// # Errors
