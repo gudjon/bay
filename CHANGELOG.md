@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.53
+
+- A unit that fails here is judged against the base run here, not a base pass from another machine.
+- The record names the base record it set aside, in `baseline.passed_elsewhere`.
+
 ## 0.7.52
 
 - A machine whose assets plugin cannot ask the store leaves the change to a runner on another machine.
