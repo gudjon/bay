@@ -10351,7 +10351,9 @@ fn handed_to_runners(
         .collect();
     environments.sort();
     environments.dedup();
-    if environments.is_empty() || !live_runner_elsewhere(ctx, &machine, &environments) {
+    if environments.is_empty()
+        || !live_runner_elsewhere(ctx, &machine, &ctx.op(op_id).unable, &environments)
+    {
         return None;
     }
     let why = rows
@@ -10532,10 +10534,29 @@ fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
 }
 
 /// G950: whether a live runner on another machine than `machine` serves every one of
-/// `environments`. A runner on `machine` shares what kept a check from an answer there.
-fn live_runner_elsewhere(ctx: &Ctx, machine: &str, environments: &[String]) -> bool {
+/// `environments`. A runner on `machine` shares what kept a check from an answer there. G954: a
+/// runner on a machine of `unable` could not run it either, so it is no one to leave it to.
+fn live_runner_elsewhere(
+    ctx: &Ctx,
+    machine: &str,
+    unable: &[String],
+    environments: &[String],
+) -> bool {
+    let mut off = unable.to_vec();
+    off.push(machine.to_owned());
     crate::presence::fetch(ctx.repo)
-        && crate::presence::serving_off(&ctx.repo.git, machine, environments).is_some()
+        && crate::presence::serving_off(&ctx.repo.git, &off, environments).is_some()
+}
+
+/// G950: this machine, when it is one that could not run operation `op`'s check and a live
+/// runner on a machine that could serves every one of `environments`.
+fn unable_here(ctx: &Ctx, op: &Operation, environments: &[String]) -> Option<String> {
+    if op.unable.is_empty() || environments.is_empty() {
+        return None;
+    }
+    let machine = crate::live::machine(&ctx.repo.git).ok()?;
+    (op.unable.contains(&machine) && live_runner_elsewhere(ctx, &machine, &op.unable, environments))
+        .then_some(machine)
 }
 
 /// BACKLOG 214 (a fleet finding, 2026-11-02: ftltlvo6): a change's own run (`bay merge --wait`)
@@ -10585,10 +10606,35 @@ fn policy_unread_here(ctx: &Ctx, op_id: &str, trunk: &str) -> Option<BayResult> 
 /// waits for a machine that is gone.
 fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Option<BayResult> {
     let op = ctx.op(op_id);
-    let waiting = op.unavailable.as_ref()?;
     if op.state.is_terminal() || op.state == OpState::Blocked {
         return None;
     }
+    // G954 (a fleet finding, 2026-11-28: a claim ends the wait (G690), and so does a retry, while
+    // the machines that could not run the check stay named; a runner on one of them read no wait,
+    // took the change again and ran its check 25 minutes to the same `infra_failure`): with no
+    // wait, a runner on such a machine passes it over too, while a live runner on another
+    // machine serves the environments the change still needs.
+    let Some(waiting) = op.unavailable.as_ref() else {
+        if op.unable.is_empty() {
+            return None;
+        }
+        let mut still = required_environments(ctx, revision, trunk)?;
+        still.sort();
+        still.dedup();
+        let machine = unable_here(ctx, op, &still)?;
+        let mut waiting = unavailable(
+            ctx,
+            op_id,
+            &still,
+            Some(&format!(
+                "this machine ({machine}) could not run its check before, and a live runner on another machine takes it"
+            )),
+        );
+        if let Some(detail) = waiting.detail.as_mut() {
+            detail["machine"] = json!(machine);
+        }
+        return Some(waiting);
+    };
     let served = check::Served::read(&ctx.repo.git);
     // G431 (a fleet finding, 2026-10-28): a wait recorded under an older policy named an
     // environment the policy at trunk no longer requires of this change, and every runner that
@@ -10617,11 +10663,7 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
                 .at_ms
                 .saturating_add(u64::try_from(gap.as_millis()).unwrap_or(u64::MAX))
     };
-    let unable_here = !op.unable.is_empty()
-        && crate::live::machine(&ctx.repo.git).is_ok_and(|machine| {
-            op.unable.contains(&machine)
-                && live_runner_elsewhere(ctx, &machine, &waiting.environments)
-        });
+    let unable_here = unable_here(ctx, op, &waiting.environments).is_some();
     if !unserved && !partial && !early && !unable_here {
         return None;
     }

@@ -361,10 +361,11 @@ pub fn last_push(common_dir: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// G950: as [`serving_until`], for the presences on a machine other than `machine`: a runner on
-/// `machine` shares what that machine cannot run. A presence that names no machine counts.
+/// G950: as [`serving_until`], for the presences on no machine of `off`: a runner on one of them
+/// shares what that machine cannot run. G954: `off` holds each machine that could not run it, as
+/// a runner there is no one to leave it to. A presence that names no machine counts.
 #[must_use]
-pub fn serving_off(git: &Git, machine: &str, environments: &[String]) -> Option<u64> {
+pub fn serving_off(git: &Git, off: &[String], environments: &[String]) -> Option<u64> {
     let listed = git
         .run(&["for-each-ref", "--format=%(objectname)", PRESENCE_PREFIX])
         .ok()?;
@@ -372,7 +373,11 @@ pub fn serving_off(git: &Git, machine: &str, environments: &[String]) -> Option<
     listed
         .lines()
         .filter_map(|commit| record_at(git, commit).ok().flatten())
-        .filter(|record| record["machine"].as_str() != Some(machine))
+        .filter(|record| {
+            !record["machine"]
+                .as_str()
+                .is_some_and(|machine| off.iter().any(|off| off == machine))
+        })
         .filter(|record| {
             environments
                 .iter()
