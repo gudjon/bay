@@ -64,6 +64,11 @@ const COUNTED_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 /// one runner's batches at one to four names until three more pushes replaced it): how long a
 /// push's time stands in the fit ([`pushes`]).
 const PUSH_STANDS: std::time::Duration = std::time::Duration::from_secs(3600);
+/// BACKLOG 366 (a fleet finding, 2026-11-27: a hosted remote listed a chain ref it could not lock,
+/// "cannot lock ref '<name>': unable to resolve reference", and one runner pushed the same atomic
+/// compaction 85 times in 5 h, so no other name of its shard moved): how long a name the host
+/// refused to lock stays out of this store's compaction pushes ([`refused`]).
+const REFUSED_STANDS: std::time::Duration = std::time::Duration::from_hours(24);
 /// The namespaces whose markers are compacted: an entry is the target the marker names.
 const MARKERS: [&str; 3] = [LANDED, INTENT, LANDED_INTENT];
 /// G921: the namespaces whose refs are compacted with their record, each with the file its
@@ -668,6 +673,47 @@ fn keep(record: &std::path::Path, names: usize, took: std::time::Duration, now: 
     }
 }
 
+/// BACKLOG 366: the names `record` holds that the host refused to lock less than
+/// [`REFUSED_STANDS`] before `now`, each with the time it was refused.
+fn refused(record: &std::path::Path, now: u64) -> BTreeMap<String, u64> {
+    std::fs::read_to_string(record)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (at, name) = line.split_once(' ')?;
+            let at: u64 = at.parse().ok()?;
+            (now.saturating_sub(at) < REFUSED_STANDS.as_secs()).then(|| (name.to_owned(), at))
+        })
+        .collect()
+}
+
+/// BACKLOG 366: the names of `moved` that `refusal`, a refused push's message, says the host
+/// could not lock. A relaying origin repeats the hosted remote's words, so one test reads both.
+fn unlockable<'m>(refusal: &str, moved: &'m [(String, String)]) -> Vec<&'m str> {
+    moved
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| refusal.contains(&format!("cannot lock ref '{name}'")))
+        .collect()
+}
+
+/// BACKLOG 366: adds `names`, refused at `now`, to `record`, which keeps those that still stand.
+fn refuse(record: &std::path::Path, names: &[&str], now: u64) {
+    let mut kept = refused(record, now);
+    for name in names {
+        kept.insert((*name).to_owned(), now);
+    }
+    let text = kept.iter().fold(String::new(), |mut text, (name, at)| {
+        let _ = writeln!(text, "{at} {name}");
+        text
+    });
+    if let Some(dir) = record.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let _ = std::fs::write(record, text);
+    }
+}
+
 /// One compaction push: the names it moved, into which shard index, the most it could move
 /// ([`sized`]) and how long the push took.
 #[derive(Debug)]
@@ -943,6 +989,11 @@ pub fn run(
     }
     let remote = &over.remote;
     let record = state_file(repo, "compaction-push");
+    let refusals = state_file(repo, "compaction-refused");
+    let held_out = refusals
+        .as_deref()
+        .map(|refusals| refused(refusals, crate::live::unix_now()))
+        .unwrap_or_default();
     // What the shards already record is read from this repository's copy of them.
     fetch(repo)?;
     let names: Vec<String> = cut
@@ -952,6 +1003,10 @@ pub fn run(
     let stored = settle_held(&repo.git, &names, remote)?;
     let mut shards: BTreeMap<u8, Vec<(String, String)>> = BTreeMap::new();
     for (name, target) in candidates(&repo.git, &cut, remote, &stored)? {
+        // BACKLOG 366: a name the host could not lock stays where it is, and its shard moves on.
+        if held_out.contains_key(&name) {
+            continue;
+        }
         shards.entry(shard(&name)).or_default().push((name, target));
     }
     let order: Vec<u8> = shards.keys().copied().collect();
@@ -994,12 +1049,25 @@ pub fn run(
         keep(record, moved.len(), took, crate::live::unix_now());
     }
     pushed.map_err(|error| {
-        format!(
-            "the compaction could not be pushed ({} names, {:.1} s): {}",
+        let refusal = error.message();
+        let unlocked = unlockable(&refusal, &moved);
+        let mut said = format!(
+            "the compaction could not be pushed ({} names, {:.1} s): {refusal}",
             moved.len(),
             took.as_secs_f64(),
-            error.message()
-        )
+        );
+        if !unlocked.is_empty()
+            && let Some(refusals) = &refusals
+        {
+            refuse(refusals, &unlocked, crate::live::unix_now());
+            let _ = write!(
+                said,
+                "; the host could not lock {}: this store leaves it out of its compaction pushes for {} h",
+                unlocked.join(", "),
+                REFUSED_STANDS.as_secs() / 3600
+            );
+        }
+        said
     })?;
     let mut lines = vec![format!("update {index} {commit}")];
     lines.extend(moved.iter().map(|(name, _)| format!("delete {name}")));
@@ -1182,8 +1250,9 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use super::{
-        FIRST, KEPT, Over, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, cost, counted,
-        index_ref, keep, name_of, path, pick, pushes, record_file, shard, sized, target_of, to_cut,
+        FIRST, KEPT, Over, PUSH_MAX, PUSH_MIN, REFUSED_STANDS, TARGET, batch, compactable, cost,
+        counted, index_ref, keep, name_of, path, pick, pushes, record_file, refuse, refused, shard,
+        sized, target_of, to_cut, unlockable,
     };
     use crate::change::HeldChain;
     use crate::names::{CHANGES, LANDED, REQUESTS};
@@ -1370,6 +1439,39 @@ mod tests {
             kept,
             (3..=KEPT + 2).collect::<Vec<_>>(),
             "the last KEPT, oldest first"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// BACKLOG 366: a name the host could not lock is read from the refusal, a relayed one too,
+    /// and stands out of the pushes for a day; a name the refusal does not name is not held out.
+    #[test]
+    fn a_name_the_host_could_not_lock_stands_out_for_a_day() {
+        let moved = vec![
+            ("refs/bay/changes/aaaa".to_owned(), "1".to_owned()),
+            ("refs/bay/landed/bbbb".to_owned(), "2".to_owned()),
+        ];
+        let direct = " ! [remote rejected]     refs/bay/changes/aaaa (cannot lock ref 'refs/bay/changes/aaaa': unable to resolve reference 'refs/bay/changes/aaaa')";
+        assert_eq!(unlockable(direct, &moved), ["refs/bay/changes/aaaa"]);
+        let relayed = "remote: bay: bay origin: moved on the hosted remote (stale info): refs/bay/landed/bbbb [remote rejected] (cannot lock ref 'refs/bay/landed/bbbb': unable to resolve reference 'refs/bay/landed/bbbb')";
+        assert_eq!(unlockable(relayed, &moved), ["refs/bay/landed/bbbb"]);
+        assert_eq!(unlockable("stale info", &moved), [""; 0]);
+
+        let dir = std::env::temp_dir().join(format!("bay-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("compaction-refused");
+        let now = 1_800_000_000;
+        assert!(refused(&record, now).is_empty(), "none refused yet");
+        refuse(&record, &["refs/bay/changes/aaaa"], now);
+        refuse(&record, &["refs/bay/landed/bbbb"], now + 60);
+        let day = REFUSED_STANDS.as_secs();
+        let held: Vec<String> = refused(&record, now + day - 1).into_keys().collect();
+        assert_eq!(held, ["refs/bay/changes/aaaa", "refs/bay/landed/bbbb"]);
+        let held: Vec<String> = refused(&record, now + day).into_keys().collect();
+        assert_eq!(
+            held,
+            ["refs/bay/landed/bbbb"],
+            "a day on, the first is tried again"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
