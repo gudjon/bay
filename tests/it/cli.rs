@@ -79,6 +79,7 @@ fn doctor_outside_a_repository_reports_the_machine_rows() {
     assert_eq!(row(&result, "hooks")["state"], "not applicable", "{result}");
     let out = test_box
         .bay(test_box.path())
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
         .arg("doctor")
         .output()
         .unwrap();
@@ -146,7 +147,12 @@ fn doctor_json_is_bay_result() {
 fn doctor_human_rendering_is_one_status_line() {
     let test_box = TestBox::new();
     let repo = test_box.repo("repo", "sha1", "files");
-    let out = test_box.bay(&repo).arg("doctor").output().unwrap();
+    let out = test_box
+        .bay(&repo)
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
+        .arg("doctor")
+        .output()
+        .unwrap();
     let document: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(document["schema"], "bay.result/1");
     let text = String::from_utf8(out.stderr).unwrap();

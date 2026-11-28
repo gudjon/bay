@@ -25,7 +25,12 @@ fn an_unreachable_remote_is_reported_not_crashed() {
     assert_eq!(result["reason"], "REMOTE_UNREACHABLE");
     assert_eq!(row(&result, "remote")["state"], "not reachable");
 
-    let line = test_box.bay(&repo).arg("doctor").output().unwrap();
+    let line = test_box
+        .bay(&repo)
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
+        .arg("doctor")
+        .output()
+        .unwrap();
     // The human status line is on stderr; stdout is the result document (INTERFACES § 8).
     let line = String::from_utf8(line.stderr).unwrap();
     assert!(

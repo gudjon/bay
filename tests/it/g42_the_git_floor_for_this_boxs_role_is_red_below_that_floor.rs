@@ -25,7 +25,12 @@ fn an_agent_view_below_2_40_is_red() {
     assert_eq!(git["state"], "red");
     assert_eq!(git["recovery"], "upgrade git");
 
-    let line = test_box.bay(&repo).arg("doctor").output().unwrap();
+    let line = test_box
+        .bay(&repo)
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
+        .arg("doctor")
+        .output()
+        .unwrap();
     // The human status line is on stderr; stdout is the result document (INTERFACES § 8).
     let line = String::from_utf8(line.stderr).unwrap();
     assert!(

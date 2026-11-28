@@ -73,8 +73,13 @@ fn a_line_says_how_its_command_wrote_and_how_many_bytes() {
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
     let common = repo.join(".git");
 
-    // WHEN a status runs through a pipe, then with `--json`
-    let piped = test_box.bay(&repo).arg("status").output().unwrap();
+    // WHEN a status runs through a pipe to a person who reads stderr (G961), then with `--json`
+    let piped = test_box
+        .bay(&repo)
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
+        .arg("status")
+        .output()
+        .unwrap();
     let json = test_box
         .bay(&repo)
         .args(["--json", "status"])

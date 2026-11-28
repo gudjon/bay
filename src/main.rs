@@ -844,6 +844,13 @@ fn stdout_is_terminal() -> bool {
         || (bay::version::TEST_HOOKS && std::env::var_os("BAY_TEST_STDOUT_TERMINAL").is_some())
 }
 
+/// Whether a person may read stderr live (G961): a terminal, or the test hook.
+fn stderr_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+        || (bay::version::TEST_HOOKS && std::env::var_os("BAY_TEST_STDERR_TERMINAL").is_some())
+}
+
 /// `bay runner run`: its result, then, between operations, the new version in its place.
 fn executor_run(dir: &std::path::Path, json: bool, once: bool, interval_s: u64) -> ExitCode {
     let result = bay::executor::run(dir, once, std::time::Duration::from_secs(interval_s));
@@ -1137,7 +1144,7 @@ fn main() -> ExitCode {
 
 /// G738: records where the command's time went, then renders its result.
 fn finish(dir: &std::path::Path, result: &BayResult, json: bool) -> ExitCode {
-    let shown = shown(result, json);
+    let shown = shown(result, json, stderr_is_terminal());
     spent(
         dir,
         result,
@@ -1462,10 +1469,10 @@ impl Shown {
 }
 
 fn render(result: &BayResult, json: bool) -> ExitCode {
-    shown(result, json).write()
+    shown(result, json, stderr_is_terminal()).write()
 }
 
-fn shown(result: &BayResult, json: bool) -> Shown {
+fn shown(result: &BayResult, json: bool, stderr_terminal: bool) -> Shown {
     // G313 (ruling 2026-10-22, ch. 35 R5): a person at a terminal reads the plain sentence
     // first, with no document; a program reads stdout through a pipe, or passes `--json`, and
     // always gets the result document, with human text on stderr (`INTERFACES` § 1).
@@ -1482,7 +1489,10 @@ fn shown(result: &BayResult, json: bool) -> Shown {
         Ok(text) => Shown {
             how: if json { "json" } else { "pipe" },
             out: with_config_used(text),
-            err: if json {
+            // G961 (ruling 2026-11-28): the human copy is for a person who reads stderr
+            // live. When stderr is not a terminal either, a program captures both streams and
+            // has the document, so a copy only doubles what it reads.
+            err: if json || !stderr_terminal {
                 String::new()
             } else {
                 result.to_human()

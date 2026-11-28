@@ -29,7 +29,12 @@ fn claude_older_than_2_1_302_is_red() {
         "upgrade Claude Code, or remove [agent] product = \"claude\" from the config"
     );
 
-    let line = test_box.bay(&repo).arg("doctor").output().unwrap();
+    let line = test_box
+        .bay(&repo)
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
+        .arg("doctor")
+        .output()
+        .unwrap();
     // The human status line is on stderr; stdout is the result document (INTERFACES § 8).
     let line = String::from_utf8(line.stderr).unwrap();
     assert!(

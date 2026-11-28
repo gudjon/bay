@@ -87,6 +87,7 @@ fn show_lists_the_talk_and_each_entry_in_order() {
         .bay(&case.a)
         .env("BAY_ACTOR", "agent")
         .env("BAY_SESSION", "s-agent")
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
         .args(["talk", "--show", &id])
         .output()
         .unwrap();

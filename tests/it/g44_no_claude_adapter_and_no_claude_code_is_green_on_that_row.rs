@@ -23,7 +23,12 @@ fn no_adapter_and_no_claude_is_green() {
         "Claude Code is not the configured agent product"
     );
 
-    let line = test_box.bay(&repo).arg("doctor").output().unwrap();
+    let line = test_box
+        .bay(&repo)
+        .env("BAY_TEST_STDERR_TERMINAL", "1")
+        .arg("doctor")
+        .output()
+        .unwrap();
     // The human status line is on stderr; stdout is the result document (INTERFACES § 8).
     let line = String::from_utf8(line.stderr).unwrap();
     assert!(
